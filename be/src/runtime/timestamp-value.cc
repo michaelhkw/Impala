@@ -14,6 +14,8 @@
 
 #include "runtime/timestamp-value.h"
 
+#include <boost/date_time/posix_time/posix_time.hpp>
+
 #include "runtime/timestamp-parse-util.h"
 
 #include "common/names.h"

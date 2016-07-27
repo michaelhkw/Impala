@@ -14,6 +14,7 @@
 
 #include "statestore/statestore.h"
 
+#include <boost/lexical_cast.hpp>
 #include <boost/thread.hpp>
 #include <thrift/Thrift.h>
 #include <gutil/strings/substitute.h>

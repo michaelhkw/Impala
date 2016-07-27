@@ -16,6 +16,7 @@
 
 #include <iomanip>
 #include <sstream>
+#include <boost/tokenizer.hpp>
 
 #include "common/version.h"
 #include "runtime/collection-value.h"
