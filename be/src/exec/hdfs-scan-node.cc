@@ -123,7 +123,8 @@ HdfsScanNode::HdfsScanNode(ObjectPool* pool, const TPlanNode& tnode,
       all_ranges_started_(false),
       counters_running_(false),
       thread_avail_cb_id_(-1),
-      rm_callback_id_(-1) {
+      rm_callback_id_(-1),
+      num_scanner_threads_to_start_(CpuInfo::num_cores() + 1) {
   max_materialized_row_batches_ = FLAGS_max_row_batches;
   if (max_materialized_row_batches_ <= 0) {
     // TODO: This parameter has an U-shaped effect on performance: increasing the value
@@ -259,6 +260,8 @@ Status HdfsScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
     }
 
     // Issue initial ranges for all file types.
+    RETURN_IF_ERROR(HdfsParquetScanner::IssueInitialRanges(this,
+        matching_per_type_files[THdfsFileFormat::PARQUET]));
     RETURN_IF_ERROR(HdfsTextScanner::IssueInitialRanges(this,
         matching_per_type_files[THdfsFileFormat::TEXT]));
     RETURN_IF_ERROR(BaseSequenceScanner::IssueInitialRanges(this,
@@ -267,8 +270,6 @@ Status HdfsScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
         matching_per_type_files[THdfsFileFormat::RC_FILE]));
     RETURN_IF_ERROR(BaseSequenceScanner::IssueInitialRanges(this,
         matching_per_type_files[THdfsFileFormat::AVRO]));
-    RETURN_IF_ERROR(HdfsParquetScanner::IssueInitialRanges(this,
-        matching_per_type_files[THdfsFileFormat::PARQUET]));
 
     // Release the scanner threads
     ranges_issued_barrier_.Notify();
@@ -730,8 +731,7 @@ Status HdfsScanNode::Open(RuntimeState* state) {
   // reservation before any ranges are issued.
   runtime_state_->resource_pool()->ReserveOptionalTokens(1);
   if (runtime_state_->query_options().num_scanner_threads > 0) {
-    runtime_state_->resource_pool()->set_max_quota(
-        runtime_state_->query_options().num_scanner_threads);
+    num_scanner_threads_to_start_ = runtime_state_->query_options().num_scanner_threads;
   }
 
   thread_avail_cb_id_ = runtime_state_->resource_pool()->AddThreadAvailableCb(
@@ -893,6 +893,7 @@ void HdfsScanNode::Close(RuntimeState* state) {
 
 Status HdfsScanNode::AddDiskIoRanges(const vector<DiskIoMgr::ScanRange*>& ranges,
     int num_files_queued) {
+  if (ranges.empty()) return Status::OK();
   RETURN_IF_ERROR(
       runtime_state_->io_mgr()->AddScanRanges(reader_context_, ranges));
   num_unqueued_files_.Add(-num_files_queued);
@@ -992,20 +993,23 @@ void HdfsScanNode::ThreadTokenAvailableCb(ThreadResourceMgr::ResourcePool* pool)
   // TODO: It would be good to have a test case for that.
   if (!initial_ranges_issued_) return;
 
-  while (true) {
+  while (num_scanner_threads_to_start_ > 0) {
     // The lock must be given up between loops in order to give writers to done_,
     // all_ranges_started_ etc. a chance to grab the lock.
     // TODO: This still leans heavily on starvation-free locks, come up with a more
     // correct way to communicate between this method and ScannerThreadHelper
     unique_lock<mutex> lock(lock_);
-    // Cases 1, 2, 3.
-    if (done_ || all_ranges_started_ ||
-      active_scanner_thread_counter_.value() >= progress_.remaining()) {
+    // Cases 1, 2.
+    if (done_ || all_ranges_started_) {
       break;
     }
 
+    // Case 3.
+    int num_active_threads = active_scanner_thread_counter_.value();
+    if (num_active_threads >= progress_.remaining()) break;
+
     // Cases 5 and 6.
-    if (active_scanner_thread_counter_.value() > 0 &&
+    if (num_active_threads > 0 &&
         (materialized_row_batches_->GetSize() >= max_materialized_row_batches_ ||
          !EnoughMemoryForScannerThread(true))) {
       break;
@@ -1026,6 +1030,8 @@ void HdfsScanNode::ThreadTokenAvailableCb(ThreadResourceMgr::ResourcePool* pool)
 
     COUNTER_ADD(&active_scanner_thread_counter_, 1);
     COUNTER_ADD(num_scanner_threads_started_counter_, 1);
+    --num_scanner_threads_to_start_;
+    DCHECK_GE(num_scanner_threads_to_start_, 0);
     stringstream ss;
     ss << "scanner-thread(" << num_scanner_threads_started_counter_->value() << ")";
     scanner_threads_.AddThread(
