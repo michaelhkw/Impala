@@ -75,6 +75,8 @@ HdfsScanNode::HdfsScanNode(ObjectPool* pool, const TPlanNode& tnode,
         10 * (DiskInfo::num_disks() + DiskIoMgr::REMOTE_NUM_DISKS);
   }
   materialized_row_batches_.reset(new RowBatchQueue(max_materialized_row_batches_));
+  row_batches_get_timer_ = runtime_profile()->AddCounter("QueueGetTime", TUnit::TIME_NS);
+  row_batches_put_timer_ = runtime_profile()->AddCounter("QueuePutTime", TUnit::TIME_NS);
 }
 
 HdfsScanNode::~HdfsScanNode() {
@@ -102,6 +104,8 @@ Status HdfsScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
     unique_lock<mutex> l(lock_);
     lock_guard<SpinLock> l2(file_type_counts_);
     StopAndFinalizeCounters();
+    row_batches_put_timer_->Set(materialized_row_batches_->total_put_wait_time());
+    row_batches_get_timer_->Set(materialized_row_batches_->total_get_wait_time());
   }
   return status;
 }
