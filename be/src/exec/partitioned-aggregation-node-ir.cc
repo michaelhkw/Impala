@@ -29,7 +29,8 @@ using namespace impala;
 Status PartitionedAggregationNode::ProcessBatchNoGrouping(RowBatch* batch) {
   Tuple* output_tuple = singleton_output_tuple_;
   FOREACH_ROW(batch, 0, batch_iter) {
-    UpdateTuple(&agg_fn_ctxs_[0], output_tuple, batch_iter.Get());
+    UpdateTuple(agg_fn_ctxs_.data(), agg_expr_ctxs_.data(), output_tuple,
+        batch_iter.Get());
   }
   return Status::OK();
 }
@@ -126,7 +127,8 @@ Status PartitionedAggregationNode::ProcessRow(TupleRow* __restrict__ row,
     DCHECK(!found);
   } else if (found) {
     // Row is already in hash table. Do the aggregation and we're done.
-    UpdateTuple(&dst_partition->agg_fn_ctxs[0], it.GetTuple(), row);
+    UpdateTuple(dst_partition->agg_fn_ctxs.data(), agg_expr_ctxs_.data(),
+        it.GetTuple(), row);
     return Status::OK();
   }
 
@@ -144,7 +146,8 @@ Status PartitionedAggregationNode::AddIntermediateTuple(Partition* __restrict__ 
         partition->aggregated_row_stream.get(), &process_batch_status_);
 
     if (LIKELY(intermediate_tuple != NULL)) {
-      UpdateTuple(&partition->agg_fn_ctxs[0], intermediate_tuple, row, AGGREGATED_ROWS);
+      UpdateTuple(&partition->agg_fn_ctxs[0], agg_expr_ctxs_.data(), intermediate_tuple,
+          row, AGGREGATED_ROWS);
       // After copying and initializing the tuple, insert it into the hash table.
       insert_it.SetTuple(intermediate_tuple, hash);
       return Status::OK();
@@ -202,7 +205,7 @@ Status PartitionedAggregationNode::ProcessBatchStreaming(bool needs_serialize,
           DCHECK(!process_batch_status_.ok());
           return process_batch_status_;
         }
-        UpdateTuple(&agg_fn_ctxs_[0], intermediate_tuple, in_row, false);
+        UpdateTuple(&agg_fn_ctxs_[0], agg_expr_ctxs_.data(), intermediate_tuple, in_row);
         out_batch_iterator.Get()->SetTuple(0, intermediate_tuple);
         out_batch_iterator.Next();
         out_batch->CommitLastRow();
@@ -250,7 +253,8 @@ bool PartitionedAggregationNode::TryAddToHashTable(
     }
   }
 
-  UpdateTuple(&partition->agg_fn_ctxs[0], intermediate_tuple, in_row, false);
+  UpdateTuple(&partition->agg_fn_ctxs[0], agg_expr_ctxs_.data(), intermediate_tuple,
+      in_row);
   return true;
 }
 

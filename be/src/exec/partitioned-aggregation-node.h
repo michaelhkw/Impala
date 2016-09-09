@@ -193,10 +193,16 @@ class PartitionedAggregationNode : public ExecNode {
   /// are doing a streaming preaggregation.
   bool is_streaming_preagg_;
 
-  /// Contains any evaluators that require the serialize step.
+  /// True if any of the evaluators require the serialize step.
   bool needs_serialize_;
 
+  /// The list of all aggregate operations for this exec node.
   std::vector<AggFnEvaluator*> aggregate_evaluators_;
+
+  /// ExprContexts of 'aggregate_evaluators_'. Used in the codegen'ed version of
+  /// UpdateTuple(). An entry is NULL if the aggregate evaluator is not codegen'ed
+  /// or there is no Expr in the aggregate evaluator (e.g. count(*)).
+  std::vector<ExprContext*> agg_expr_ctxs_;
 
   /// FunctionContext for each aggregate function and backing MemPool. String data
   /// returned by the aggregate functions is allocated via these contexts.
@@ -468,9 +474,12 @@ class PartitionedAggregationNode : public ExecNode {
   /// belonging to the same partition independent of whether the agg fn evaluators have
   /// is_merge() == true.
   /// This function is replaced by codegen (which is why we don't use a vector argument
-  /// for agg_fn_ctxs). Any var-len data is allocated from the FunctionContexts.
-  void UpdateTuple(impala_udf::FunctionContext** agg_fn_ctxs, Tuple* tuple, TupleRow* row,
-                   bool is_merge = false);
+  /// for 'agg_fn_ctxs'). Any var-len data is allocated from the FunctionContexts.
+  /// 'agg_expr_ctxs' are the thread-private contexts for storing the results of
+  /// expression evaluation in the agg fn evaluator. This is only used in the codegen'ed
+  /// version of this function.
+  void UpdateTuple(impala_udf::FunctionContext** agg_fn_ctxs, ExprContext** agg_expr_ctxs,
+      Tuple* tuple, TupleRow* row, bool is_merge = false);
 
   /// Called on the intermediate tuple of each group after all input rows have been
   /// consumed and aggregated. Computes the final aggregate values to be returned in

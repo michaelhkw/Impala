@@ -30,7 +30,8 @@ using namespace impala;
 
 void AggregationNode::ProcessRowBatchNoGrouping(RowBatch* batch) {
   for (int i = 0; i < batch->num_rows(); ++i) {
-    UpdateTuple(singleton_intermediate_tuple_, batch->GetRow(i));
+    UpdateTuple(agg_fn_ctxs_.data(), agg_expr_ctxs_.data(),
+        singleton_intermediate_tuple_, batch->GetRow(i));
   }
 }
 
@@ -45,7 +46,7 @@ void AggregationNode::ProcessRowBatchWithGrouping(RowBatch* batch) {
     } else {
       agg_tuple = it.GetTuple();
     }
-    UpdateTuple(agg_tuple, row);
+    UpdateTuple(agg_fn_ctxs_.data(), agg_expr_ctxs_.data(), agg_tuple, row);
   }
 }
 

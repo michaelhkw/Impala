@@ -69,11 +69,17 @@ class AggregationNode : public ExecNode {
   boost::scoped_ptr<OldHashTable> hash_tbl_;
   OldHashTable::Iterator output_iterator_;
 
+  /// The list of all aggregate operations for this exec node.
   std::vector<AggFnEvaluator*> aggregate_evaluators_;
 
   /// FunctionContext for each agg fn and backing pool.
   std::vector<impala_udf::FunctionContext*> agg_fn_ctxs_;
   boost::scoped_ptr<MemPool> agg_fn_pool_;
+
+  /// ExprContexts of 'aggregate_evaluators_'. Used in the codegen'ed version of
+  /// UpdateTuple(). An entry is NULL if the aggregate evaluator is not codegen'ed
+  /// or there is no Expr in the aggregate evaluator (e.g. count(*)).
+  std::vector<ExprContext*> agg_expr_ctxs_;
 
   /// Exprs used to evaluate input rows
   std::vector<ExprContext*> probe_expr_ctxs_;
@@ -124,8 +130,12 @@ class AggregationNode : public ExecNode {
   Tuple* ConstructIntermediateTuple();
 
   /// Updates the aggregation intermediate tuple 'tuple' with aggregation values
-  /// computed over 'row'.
-  void UpdateTuple(Tuple* tuple, TupleRow* row);
+  /// computed over 'row' using 'agg_fn_ctxs'. This function is replaced by codegen.
+  /// 'agg_expr_ctxs' are the thread-private contexts for storing the results of
+  /// expression evaluation in the agg fn evaluator. This is only used in the codegen'ed
+  /// version of this function.
+  void UpdateTuple(impala_udf::FunctionContext** agg_fn_ctxs, ExprContext** agg_expr_ctxs,
+      Tuple* tuple, TupleRow* row);
 
   /// Called on the intermediate tuple of each group after all input rows have been
   /// consumed and aggregated. Computes the final aggregate values to be returned in

@@ -270,7 +270,7 @@ inline void AggFnEvaluator::Init(const std::vector<AggFnEvaluator*>& evaluators,
   }
 }
 inline void AggFnEvaluator::Add(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Add(fn_ctxs[i], src, dst);

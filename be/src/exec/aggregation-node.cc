@@ -81,6 +81,13 @@ Status AggregationNode::Init(const TPlanNode& tnode, RuntimeState* state) {
     RETURN_IF_ERROR(AggFnEvaluator::Create(
         pool_, tnode.agg_node.aggregate_functions[i], &evaluator));
     aggregate_evaluators_.push_back(evaluator);
+    // Use NULL if the aggregate evaluator is not codegen'ed.
+    ExprContext* agg_expr_ctx = NULL;
+    if (evaluator->agg_op() != AggFnEvaluator::OTHER && !evaluator->is_count_star()) {
+      DCHECK_EQ(evaluator->input_expr_ctxs().size(), 1);
+      agg_expr_ctx = evaluator->input_expr_ctxs()[0];
+    }
+    agg_expr_ctxs_.push_back(agg_expr_ctx);
   }
   return Status::OK();
 }
@@ -368,9 +375,12 @@ Tuple* AggregationNode::ConstructIntermediateTuple() {
   return intermediate_tuple;
 }
 
-void AggregationNode::UpdateTuple(Tuple* tuple, TupleRow* row) {
+void AggregationNode::UpdateTuple(FunctionContext** fn_ctxs, ExprContext** expr_ctxs,
+    Tuple* tuple, TupleRow* row) {
   DCHECK(tuple != NULL || aggregate_evaluators_.empty());
-  AggFnEvaluator::Add(aggregate_evaluators_, agg_fn_ctxs_, row, tuple);
+  for (int i = 0; i < aggregate_evaluators_.size(); ++i) {
+    aggregate_evaluators_[i]->Add(fn_ctxs[i], row, tuple);
+  }
 }
 
 Tuple* AggregationNode::FinalizeTuple(Tuple* tuple, MemPool* pool) {
@@ -432,23 +442,26 @@ IRFunction::Type GetHllUpdateFunction2(const ColumnType& type) {
 }
 
 // IR Generation for updating a single aggregation slot. Signature is:
-// void UpdateSlot(FunctionContext* fn_ctx, AggTuple* agg_tuple, char** row)
+// void UpdateSlot(FunctionContext* fn_ctx, ExprContext* expr_ctx,
+//     AggTuple* agg_tuple, char** row)
 //
 // The IR for sum(double_col) is:
 // define void @UpdateSlot(%"class.impala_udf::FunctionContext"* %fn_ctx,
-//                         { i8, double }* %agg_tuple,
-//                         %"class.impala::TupleRow"* %row) #20 {
+//                         %"class.impala::ExprContext"* %expr_ctx,
+//                         { i8, [7 x i8], double }* %agg_tuple,
+//                         %"class.impala::TupleRow"* %row) #34 {
 // entry:
-//   %src = call { i8, double } @GetSlotRef(%"class.impala::ExprContext"* inttoptr
-//     (i64 128241264 to %"class.impala::ExprContext"*), %"class.impala::TupleRow"* %row)
+//   %src = call { i8, double } @GetSlotRef(%"class.impala::ExprContext"* %expr_ctx,
+//                                          %"class.impala::TupleRow"* %row)
 //   %0 = extractvalue { i8, double } %src, 0
 //   %is_null = trunc i8 %0 to i1
 //   br i1 %is_null, label %ret, label %src_not_null
 //
 // src_not_null:                                     ; preds = %entry
-//   %dst_slot_ptr = getelementptr inbounds { i8, double }* %agg_tuple, i32 0, i32 1
-//   call void @SetNotNull({ i8, double }* %agg_tuple)
-//   %dst_val = load double* %dst_slot_ptr
+//   %dst_slot_ptr = getelementptr inbounds { i8, [7 x i8], double },
+//       { i8, [7 x i8], double }* %agg_tuple, i32 0, i32 2
+//   call void @SetNotNull({ i8, [7 x i8], double }* %agg_tuple)
+//   %dst_val = load double, double* %dst_slot_ptr
 //   %val = extractvalue { i8, double } %src, 1
 //   %1 = fadd double %dst_val, %val
 //   store double %1, double* %dst_slot_ptr
@@ -460,25 +473,27 @@ IRFunction::Type GetHllUpdateFunction2(const ColumnType& type) {
 //
 // The IR for ndv(double_col) is:
 // define void @UpdateSlot(%"class.impala_udf::FunctionContext"* %fn_ctx,
-//                         { i8, %"struct.impala::StringValue" }* %agg_tuple,
-//                         %"class.impala::TupleRow"* %row) #20 {
+//                         %"class.impala::ExprContext"* %expr_ctx,
+//                         { i8, [7 x i8], %"struct.impala::StringValue" }* %agg_tuple,
+//                         %"class.impala::TupleRow"* %row) #34 {
 // entry:
 //   %dst_lowered_ptr = alloca { i64, i8* }
-//   %src_lowered_ptr = alloca { i8, double }
-//   %src = call { i8, double } @GetSlotRef(%"class.impala::ExprContext"* inttoptr
-//     (i64 120530832 to %"class.impala::ExprContext"*), %"class.impala::TupleRow"* %row)
-//   %0 = extractvalue { i8, double } %src, 0
-//   %is_null = trunc i8 %0 to i1
+//   %src_lowered_ptr = alloca { i64, i8* }
+//   %src = call { i64, i8* } @GetSlotRef(%"class.impala::ExprContext"* %expr_ctx,
+//                                        %"class.impala::TupleRow"* %row)
+//   %0 = extractvalue { i64, i8* } %src, 0
+//   %is_null = trunc i64 %0 to i1
 //   br i1 %is_null, label %ret, label %src_not_null
 //
 // src_not_null:                                     ; preds = %entry
-//   %dst_slot_ptr = getelementptr inbounds
-//     { i8, %"struct.impala::StringValue" }* %agg_tuple, i32 0, i32 1
-//   call void @SetNotNull({ i8, %"struct.impala::StringValue" }* %agg_tuple)
-//   %dst_val = load %"struct.impala::StringValue"* %dst_slot_ptr
-//   store { i8, double } %src, { i8, double }* %src_lowered_ptr
-//   %src_unlowered_ptr = bitcast { i8, double }* %src_lowered_ptr
-//                        to %"struct.impala_udf::DoubleVal"*
+//   %dst_slot_ptr = getelementptr inbounds { i8, [7 x i8], %"struct.impala::StringValue" },
+//       { i8, [7 x i8], %"struct.impala::StringValue" }* %agg_tuple, i32 0, i32 2
+//   call void @SetNotNull({ i8, [7 x i8], %"struct.impala::StringValue" }* %agg_tuple)
+//   %dst_val =
+//       load %"struct.impala::StringValue", %"struct.impala::StringValue"* %dst_slot_ptr
+//   store { i64, i8* } %src, { i64, i8* }* %src_lowered_ptr
+//   %src_unlowered_ptr =
+//       bitcast { i64, i8* }* %src_lowered_ptr to %"struct.impala_udf::StringVal"*
 //   %ptr = extractvalue %"struct.impala::StringValue" %dst_val, 0
 //   %dst_stringval = insertvalue { i64, i8* } zeroinitializer, i8* %ptr, 1
 //   %len = extractvalue %"struct.impala::StringValue" %dst_val, 1
@@ -489,18 +504,18 @@ IRFunction::Type GetHllUpdateFunction2(const ColumnType& type) {
 //   %5 = or i64 %4, %3
 //   %dst_stringval1 = insertvalue { i64, i8* } %dst_stringval, i64 %5, 0
 //   store { i64, i8* } %dst_stringval1, { i64, i8* }* %dst_lowered_ptr
-//   %dst_unlowered_ptr = bitcast { i64, i8* }* %dst_lowered_ptr
-//                        to %"struct.impala_udf::StringVal"*
-//   call void @HllUpdate(%"class.impala_udf::FunctionContext"* %fn_ctx,
-//                        %"struct.impala_udf::DoubleVal"* %src_unlowered_ptr,
-//                        %"struct.impala_udf::StringVal"* %dst_unlowered_ptr)
-//   %anyval_result = load { i64, i8* }* %dst_lowered_ptr
-//   %6 = extractvalue { i64, i8* } %anyval_result, 1
-//   %7 = insertvalue %"struct.impala::StringValue" zeroinitializer, i8* %6, 0
-//   %8 = extractvalue { i64, i8* } %anyval_result, 0
-//   %9 = ashr i64 %8, 32
-//   %10 = trunc i64 %9 to i32
-//   %11 = insertvalue %"struct.impala::StringValue" %7, i32 %10, 1
+//   %dst_unlowered_ptr =
+//       bitcast { i64, i8* }* %dst_lowered_ptr to %"struct.impala_udf::StringVal"*
+//   call void @HllMerge(%"class.impala_udf::FunctionContext"* %fn_ctx,
+//                       %"struct.impala_udf::StringVal"* %src_unlowered_ptr,
+//                       %"struct.impala_udf::StringVal"* %dst_unlowered_ptr)
+//   %anyval_result = load { i64, i8* }, { i64, i8* }* %dst_lowered_ptr
+//   %6 = extractvalue { i64, i8* } %anyval_result, 0
+//   %7 = ashr i64 %6, 32
+//   %8 = trunc i64 %7 to i32
+//   %9 = insertvalue %"struct.impala::StringValue" zeroinitializer, i32 %8, 1
+//   %10 = extractvalue { i64, i8* } %anyval_result, 1
+//   %11 = insertvalue %"struct.impala::StringValue" %9, i8* %10, 0
 //   store %"struct.impala::StringValue" %11, %"struct.impala::StringValue"* %dst_slot_ptr
 //   br label %ret
 //
@@ -525,33 +540,34 @@ llvm::Function* AggregationNode::CodegenUpdateSlot(
   }
   DCHECK(agg_expr_fn != NULL);
 
-  PointerType* fn_ctx_type =
+  PointerType* fn_ctx_ptr_type =
       codegen->GetPtrType(FunctionContextImpl::LLVM_FUNCTIONCONTEXT_NAME);
+  PointerType* expr_ctx_ptr_type = codegen->GetPtrType(ExprContext::LLVM_CLASS_NAME);
   StructType* tuple_struct = intermediate_tuple_desc_->GetLlvmStruct(codegen);
-  PointerType* tuple_ptr_type = PointerType::get(tuple_struct, 0);
+  PointerType* tuple_ptr_type = codegen->GetPtrType(tuple_struct);
   PointerType* tuple_row_ptr_type = codegen->GetPtrType(TupleRow::LLVM_CLASS_NAME);
 
   // Create UpdateSlot prototype
   LlvmCodeGen::FnPrototype prototype(codegen, "UpdateSlot", codegen->void_type());
-  prototype.AddArgument(LlvmCodeGen::NamedVariable("fn_ctx", fn_ctx_type));
+  prototype.AddArgument(LlvmCodeGen::NamedVariable("fn_ctx", fn_ctx_ptr_type));
+  prototype.AddArgument(LlvmCodeGen::NamedVariable("expr_ctx", expr_ctx_ptr_type));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("agg_tuple", tuple_ptr_type));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("row", tuple_row_ptr_type));
 
   LlvmCodeGen::LlvmBuilder builder(codegen->context());
-  Value* args[3];
+  Value* args[4];
   Function* fn = prototype.GeneratePrototype(&builder, &args[0]);
   Value* fn_ctx_arg = args[0];
-  Value* agg_tuple_arg = args[1];
-  Value* row_arg = args[2];
+  Value* expr_ctx_arg = args[1];
+  Value* agg_tuple_arg = args[2];
+  Value* row_arg = args[3];
 
   BasicBlock* src_not_null_block =
       BasicBlock::Create(codegen->context(), "src_not_null", fn);
   BasicBlock* ret_block = BasicBlock::Create(codegen->context(), "ret", fn);
 
   // Call expr function to get src slot value
-  Value* ctx_arg = codegen->CastPtrToLlvmPtr(
-      codegen->GetPtrType(ExprContext::LLVM_CLASS_NAME), input_expr_ctx);
-  Value* agg_expr_fn_args[] = { ctx_arg, row_arg };
+  Value* agg_expr_fn_args[] = { expr_ctx_arg, row_arg };
   CodegenAnyVal src = CodegenAnyVal::CreateCallWrapped(
       codegen, &builder, input_expr->type(), agg_expr_fn, agg_expr_fn_args, "src");
 
@@ -661,22 +677,40 @@ llvm::Function* AggregationNode::CodegenUpdateSlot(
 // select count(*), count(int_col), sum(double_col) the IR looks like:
 //
 // define void @UpdateTuple(%"class.impala::AggregationNode"* %this_ptr,
+//                          %"class.impala_udf::FunctionContext"** %fn_ctxs,
+//                          %"class.impala::ExprContext"** %expr_ctxs,
 //                          %"class.impala::Tuple"* %agg_tuple,
-//                          %"class.impala::TupleRow"* %tuple_row) #20 {
+//                          %"class.impala::TupleRow"* %tuple_row) #34 {
 // entry:
-//   %tuple = bitcast %"class.impala::Tuple"* %agg_tuple to { i8, i64, i64, double }*
-//   %src_slot = getelementptr inbounds { i8, i64, i64, double }* %tuple, i32 0, i32 1
-//   %count_star_val = load i64* %src_slot
+//   %tuple = bitcast %"class.impala::Tuple"* %agg_tuple to
+//       { i8, [7 x i8], i64, i64, double }*
+//   %src_slot = getelementptr inbounds { i8, [7 x i8], i64, i64, double },
+//       { i8, [7 x i8], i64, i64, double }* %tuple, i32 0, i32 2
+//   %count_star_val = load i64, i64* %src_slot
 //   %count_star_inc = add i64 %count_star_val, 1
 //   store i64 %count_star_inc, i64* %src_slot
-//   call void @UpdateSlot(%"class.impala_udf::FunctionContext"* inttoptr
-//                           (i64 44521296 to %"class.impala_udf::FunctionContext"*),
-//                         { i8, i64, i64, double }* %tuple,
+//   %0 = getelementptr %"class.impala_udf::FunctionContext"*,
+//       %"class.impala_udf::FunctionContext"** %fn_ctxs, i32 1
+//   %fn_ctx = load %"class.impala_udf::FunctionContext"*,
+//       %"class.impala_udf::FunctionContext"** %0
+//   %1 = getelementptr %"class.impala::ExprContext"*,
+//       %"class.impala::ExprContext"** %expr_ctxs, i32 1
+//   %expr_ctx = load %"class.impala::ExprContext"*, %"class.impala::ExprContext"** %1
+//   call void @UpdateSlot(%"class.impala_udf::FunctionContext"* %fn_ctx,
+//                         %"class.impala::ExprContext"* %expr_ctx,
+//                         { i8, [7 x i8], i64, i64, double }* %tuple,
 //                         %"class.impala::TupleRow"* %tuple_row)
-//   call void @UpdateSlot5(%"class.impala_udf::FunctionContext"* inttoptr
-//                            (i64 44521328 to %"class.impala_udf::FunctionContext"*),
-//                          { i8, i64, i64, double }* %tuple,
-//                          %"class.impala::TupleRow"* %tuple_row)
+//   %2 = getelementptr %"class.impala_udf::FunctionContext"*,
+//       %"class.impala_udf::FunctionContext"** %fn_ctxs, i32 2
+//   %fn_ctx1 = load %"class.impala_udf::FunctionContext"*,
+//       %"class.impala_udf::FunctionContext"** %2
+//   %3 = getelementptr %"class.impala::ExprContext"*,
+//       %"class.impala::ExprContext"** %expr_ctxs, i32 2
+//   %expr_ctx2 = load %"class.impala::ExprContext"*, %"class.impala::ExprContext"** %3
+//   call void @UpdateSlot.3(%"class.impala_udf::FunctionContext"* %fn_ctx1,
+//                           %"class.impala::ExprContext"* %expr_ctx2,
+//                           { i8, [7 x i8], i64, i64, double }* %tuple,
+//                           %"class.impala::TupleRow"* %tuple_row)
 //   ret void
 // }
 Function* AggregationNode::CodegenUpdateTuple(RuntimeState* state) {
@@ -721,27 +755,38 @@ Function* AggregationNode::CodegenUpdateTuple(RuntimeState* state) {
   DCHECK(agg_tuple_type != NULL);
   DCHECK(tuple_row_type != NULL);
 
-  PointerType* agg_node_ptr_type = PointerType::get(agg_node_type, 0);
-  PointerType* agg_tuple_ptr_type = PointerType::get(agg_tuple_type, 0);
-  PointerType* tuple_row_ptr_type = PointerType::get(tuple_row_type, 0);
+  PointerType* agg_node_ptr_type = codegen->GetPtrType(agg_node_type);
+  PointerType* fn_ctx_ptr_type =
+      codegen->GetPtrType(FunctionContextImpl::LLVM_FUNCTIONCONTEXT_NAME);
+  PointerType* fn_ctx_ptr_ptr_type = codegen->GetPtrType(fn_ctx_ptr_type);
+  PointerType* expr_ctx_ptr_type = codegen->GetPtrType(ExprContext::LLVM_CLASS_NAME);
+  PointerType* expr_ctx_ptr_ptr_type = codegen->GetPtrType(expr_ctx_ptr_type);
+  PointerType* agg_tuple_ptr_type = codegen->GetPtrType(agg_tuple_type);
+  PointerType* tuple_row_ptr_type = codegen->GetPtrType(tuple_row_type);
 
   // Signature for UpdateTuple is
-  // void UpdateTuple(AggregationNode* this, Tuple* tuple, TupleRow* row)
+  // void UpdateTuple(AggregationNode* this, FunctionContext** fn_ctx,
+  //     ExprContext** expr_ctx, Tuple* tuple, TupleRow* row)
   // This signature needs to match the non-codegen'd signature exactly.
   StructType* tuple_struct = intermediate_tuple_desc_->GetLlvmStruct(codegen);
   PointerType* tuple_ptr = PointerType::get(tuple_struct, 0);
   LlvmCodeGen::FnPrototype prototype(codegen, "UpdateTuple", codegen->void_type());
   prototype.AddArgument(LlvmCodeGen::NamedVariable("this_ptr", agg_node_ptr_type));
+  prototype.AddArgument(LlvmCodeGen::NamedVariable("fn_ctxs", fn_ctx_ptr_ptr_type));
+  prototype.AddArgument(LlvmCodeGen::NamedVariable("expr_ctxs", expr_ctx_ptr_ptr_type));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("agg_tuple", agg_tuple_ptr_type));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("tuple_row", tuple_row_ptr_type));
 
   LlvmCodeGen::LlvmBuilder builder(codegen->context());
-  Value* args[3];
+  Value* args[5];
   Function* fn = prototype.GeneratePrototype(&builder, &args[0]);
 
   // Cast the parameter types to the internal llvm runtime types.
   // TODO: get rid of this by using right type in function signature
-  args[1] = builder.CreateBitCast(args[1], tuple_ptr, "tuple");
+  Value* fn_ctxs_arg = args[1];
+  Value* expr_ctxs_arg = args[2];
+  Value* agg_tuple_arg = builder.CreateBitCast(args[3], tuple_ptr, "tuple");
+  Value* row_arg = args[4];
 
   // Loop over each expr and generate the IR for that slot.  If the expr is not
   // count(*), generate a helper IR function to update the slot and call that.
@@ -754,18 +799,20 @@ Function* AggregationNode::CodegenUpdateTuple(RuntimeState* state) {
       // increment the slot by the number of rows in the batch.
       int field_idx = slot_desc->llvm_field_idx();
       Value* const_one = codegen->GetIntConstant(TYPE_BIGINT, 1);
-      Value* slot_ptr = builder.CreateStructGEP(NULL, args[1], field_idx, "src_slot");
+      Value* slot_ptr = builder.CreateStructGEP(NULL, agg_tuple_arg, field_idx,
+          "src_slot");
       Value* slot_loaded = builder.CreateLoad(slot_ptr, "count_star_val");
       Value* count_inc = builder.CreateAdd(slot_loaded, const_one, "count_star_inc");
       builder.CreateStore(count_inc, slot_ptr);
     } else {
       Function* update_slot_fn = CodegenUpdateSlot(state, evaluator, slot_desc);
       if (update_slot_fn == NULL) return NULL;
-      Value* fn_ctx_arg = codegen->CastPtrToLlvmPtr(
-          codegen->GetPtrType(FunctionContextImpl::LLVM_FUNCTIONCONTEXT_NAME),
-          agg_fn_ctxs_[i]);
-      builder.CreateCall(update_slot_fn,
-          ArrayRef<Value*>({fn_ctx_arg, args[1], args[2]}));
+      Value* fn_ctx_ptr = builder.CreateConstGEP1_32(fn_ctxs_arg, i);
+      Value* fn_ctx = builder.CreateLoad(fn_ctx_ptr, "fn_ctx");
+      Value* expr_ctx_ptr = builder.CreateConstGEP1_32(expr_ctxs_arg, i);
+      Value* expr_ctx = builder.CreateLoad(expr_ctx_ptr, "expr_ctx");
+      Value* update_slot_args[] = { fn_ctx, expr_ctx, agg_tuple_arg, row_arg };
+      builder.CreateCall(update_slot_fn, update_slot_args);
     }
   }
   builder.CreateRetVoid();
