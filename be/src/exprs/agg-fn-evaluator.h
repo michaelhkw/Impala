@@ -147,9 +147,11 @@ class AggFnEvaluator {
   void Finalize(FunctionContext* agg_fn_ctx, Tuple* src, Tuple* dst);
 
   /// Puts the finalized value from Tuple* src in Tuple* dst just as Finalize() does.
-  /// However, unlike Finalize(), GetValue() does not clean up state in src. GetValue()
-  /// can be called repeatedly with the same src. Only used internally for analytic fn
-  /// builtins.
+  /// However, unlike Finalize(), GetValue() does not clean up state in src.
+  /// GetValue() can be called repeatedly with the same src. Only used internally for
+  /// analytic fn builtins. Note that the buffer for StringVal result needs to be copied
+  /// out if it's needed beyond the scope of the call site. (e.g. 'dst' lives in a row
+  /// batch which is passed upstream).
   void GetValue(FunctionContext* agg_fn_ctx, Tuple* src, Tuple* dst);
 
   /// Helper functions for calling the above functions on many evaluators.
@@ -229,10 +231,12 @@ class AggFnEvaluator {
   /// fn must be a function that implement's the UDA Update() signature.
   void Update(FunctionContext* agg_fn_ctx, const TupleRow* row, Tuple* dst, void* fn);
 
-  /// Sets up the arguments to call fn. This converts from the agg-expr signature,
+  /// Sets up the arguments to call 'fn'. This converts from the agg-expr signature,
   /// taking TupleRow to the UDA signature taking AnvVals. Writes the serialize/finalize
-  /// result to the given destination slot/tuple. The fn can be NULL to indicate the src
-  /// value should simply be written into the destination.
+  /// result to the given destination slot/tuple. 'fn' can be NULL to indicate the src
+  /// value should simply be written into the destination. Note that allocation of the
+  /// buffer for StringVal result needs to be copied out if it's needed beyond the scope
+  /// of the call site (e.g. 'dst' lives in a row batch which is passed upstream).
   void SerializeOrFinalize(FunctionContext* agg_fn_ctx, Tuple* src,
       const SlotDescriptor* dst_slot_desc, Tuple* dst, void* fn);
 
@@ -293,7 +297,7 @@ inline void AggFnEvaluator::Serialize(const std::vector<AggFnEvaluator*>& evalua
   }
 }
 inline void AggFnEvaluator::GetValue(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->GetValue(fn_ctxs[i], src, dst);
