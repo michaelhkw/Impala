@@ -1,0 +1,17 @@
+====
+---- QUERY
+# Regression test for IMPALA-4180: a single node plan with multiple top-n nodes
+# whose children are scan nodes.
+with t as (select int_col x from functional.alltypestiny order by id limit 2)
+select * from t t1
+  join t t2 on t1.x = t2.x
+    join t t3 on t2.x = t3.x
+      join t t4 on t3.x = t4.x
+        join t t5 on t4.x = t5.x
+order by t1.x limit 10
+---- TYPES
+int,int,int,int,int
+---- RESULTS
+0,0,0,0,0
+1,1,1,1,1
+====

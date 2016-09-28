@@ -128,6 +128,10 @@ class TestQueries(ImpalaTestSuite):
       pytest.xfail("null data does not appear to work in hbase")
     self.run_test_case('QueryTest/null_data', vector)
 
+  def test_single_node_topn(self, vector):
+    vector.get_value('exec_option')['num_nodes'] = 1
+    self.run_test_case('QueryTest/single-node-topn', vector)
+
 # Tests in this class are only run against text/none either because that's the only
 # format that is supported, or the tests don't exercise the file format.
 class TestQueriesTextTables(ImpalaTestSuite):
