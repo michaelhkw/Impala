@@ -224,6 +224,10 @@ LlvmCodeGen::LlvmCodeGen(ObjectPool* pool, const string& id) :
   num_instructions_ = ADD_COUNTER(&profile_, "NumInstructions", TUnit::UNIT);
 
   loaded_functions_.resize(IRFunction::FN_END);
+  for (int i = IRFunction::FN_START; i < IRFunction::FN_END; ++i) {
+    DCHECK(FN_MAPPINGS[i].fn == i);
+    loaded_functions_[i] = NULL;
+  }
 }
 
 Status LlvmCodeGen::CreateFromFile(ObjectPool* pool,
@@ -390,49 +394,12 @@ Status LlvmCodeGen::CreateImpalaCodegen(
     return Status("Could not create llvm struct type for StringVal");
   }
 
-  // Fills 'functions' with all the cross-compiled functions that are defined in
-  // the module.
-  vector<Function*> functions;
-  for (Function& fn: codegen->module_->functions()) {
-    if (fn.isMaterializable()) functions.push_back(&fn);
-    if (gv_ref_ir_fns_.find(fn.getName()) != gv_ref_ir_fns_.end()) {
-      codegen->MaterializeFunction(&fn);
-    }
+  // Materialize functions implicitly referenced by the global variables.
+  for (const string& fn_name : gv_ref_ir_fns_) {
+    Function* fn = codegen->module_->getFunction(StringRef(fn_name.c_str()));
+    DCHECK(fn != NULL);
+    codegen->MaterializeFunction(fn);
   }
-  int parsed_functions = 0;
-  for (int i = 0; i < functions.size(); ++i) {
-    string fn_name = functions[i]->getName();
-    for (int j = IRFunction::FN_START; j < IRFunction::FN_END; ++j) {
-      // Substring match to match precompiled functions.  The compiled function names
-      // will be mangled.
-      // TODO: reconsider this.  Substring match is probably not strict enough but
-      // undoing the mangling is no fun either.
-      if (fn_name.find(FN_MAPPINGS[j].fn_name) != string::npos) {
-        // TODO: make this a DCHECK when we resolve IMPALA-2439
-        CHECK(codegen->loaded_functions_[FN_MAPPINGS[j].fn] == NULL)
-            << "Duplicate definition found for function " << FN_MAPPINGS[j].fn_name
-            << ": " << fn_name;
-        functions[i]->addFnAttr(Attribute::AlwaysInline);
-        codegen->loaded_functions_[FN_MAPPINGS[j].fn] = functions[i];
-        ++parsed_functions;
-      }
-    }
-  }
-
-  if (parsed_functions != IRFunction::FN_END) {
-    stringstream ss;
-    ss << "Unable to find these precompiled functions: ";
-    bool first = true;
-    for (int i = IRFunction::FN_START; i != IRFunction::FN_END; ++i) {
-      if (codegen->loaded_functions_[i] == NULL) {
-        if (!first) ss << ", ";
-        ss << FN_MAPPINGS[i].fn_name;
-        first = false;
-      }
-    }
-    return Status(ss.str());
-  }
-
   return Status::OK();
 }
 
@@ -687,8 +654,18 @@ Function* LlvmCodeGen::GetFunction(const string& symbol) {
 }
 
 Function* LlvmCodeGen::GetFunction(IRFunction::Type ir_type, bool clone) {
-  DCHECK(loaded_functions_[ir_type] != NULL);
   Function* fn = loaded_functions_[ir_type];
+  if (fn == NULL) {
+    DCHECK(FN_MAPPINGS[ir_type].fn == ir_type);
+    StringRef fn_name(FN_MAPPINGS[ir_type].fn_name.c_str());
+    fn = module_->getFunction(fn_name);
+    if (fn == NULL) {
+      LOG(ERROR) << "Unable to locate function " << fn_name.str();
+      return NULL;
+    }
+    fn->addFnAttr(Attribute::AlwaysInline);
+    loaded_functions_[ir_type] = fn;
+  }
   Status status = MaterializeFunction(fn);
   if (UNLIKELY(!status.ok())) return NULL;
   if (clone) return CloneFunction(fn);
