@@ -552,6 +552,11 @@ class LlvmCodeGen {
   /// Whether InitializeLlvm() has been called.
   static bool llvm_initialized_;
 
+  /// InitializeLlvm() checks the integrity of the module by verifying all functions
+  /// defined in IRFunction::Type enum can be found. Set to true if some functions
+  /// cannot be found.
+  static bool llvm_module_corrupted_;
+
   /// Host CPU name and attributes, filled in by InitializeLlvm().
   static std::string cpu_name_;
   static std::vector<std::string> cpu_attrs_;
