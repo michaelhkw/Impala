@@ -19,6 +19,7 @@
 #ifndef IMPALA_EXEC_HDFS_PARQUET_SCANNER_H
 #define IMPALA_EXEC_HDFS_PARQUET_SCANNER_H
 
+#include "codegen/impala-ir.h"
 #include "exec/hdfs-scanner.h"
 #include "exec/parquet-common.h"
 #include "exec/parquet-scratch-tuple-batch.h"
@@ -336,6 +337,7 @@ class HdfsParquetScanner : public HdfsScanner {
   /// 'process_scratch_batch_fn' if codegen was successful or NULL otherwise.
   static Status Codegen(HdfsScanNodeBase* node,
       const std::vector<ExprContext*>& conjunct_ctxs,
+      const std::vector<FilterContext>& filter_ctxs,
       llvm::Function** process_scratch_batch_fn);
 
   /// The repetition level is set to this value to indicate the end of a row group.
@@ -355,6 +357,9 @@ class HdfsParquetScanner : public HdfsScanner {
   /// Size of the file footer.  This is a guess.  If this value is too little, we will
   /// need to issue another read.
   static const int64_t FOOTER_SIZE = 1024 * 100;
+
+  /// Class name in LLVM IR.
+  static const char* LLVM_CLASS_NAME;
 
   /// Index of the current row group being processed. Initialized to -1 which indicates
   /// that we have not started processing the first row group yet (GetNext() has not yet
@@ -380,10 +385,6 @@ class HdfsParquetScanner : public HdfsScanner {
     /// Total number of rows that each filter rejected.
     int64_t rejected;
 
-    /// Total number of rows that each filter could have been applied to (if it were
-    /// available from row 0).
-    int64_t total_possible;
-
     /// Use known-width type to act as logical boolean.  Set to 1 if corresponding filter
     /// in filter_ctxs_ should be applied, 0 if it was ineffective and was disabled.
     uint8_t enabled;
@@ -391,7 +392,7 @@ class HdfsParquetScanner : public HdfsScanner {
     /// Padding to ensure structs do not straddle cache-line boundary.
     uint8_t padding[7];
 
-    LocalFilterStats() : considered(0), rejected(0), total_possible(0), enabled(1) { }
+    LocalFilterStats() : considered(0), rejected(0), enabled(1) { }
   };
 
   /// Pool used for allocating caches of definition/repetition levels that are
@@ -402,6 +403,9 @@ class HdfsParquetScanner : public HdfsScanner {
   /// that expensive aggregation up to the scan node can be performed once, during
   /// Close().
   vector<LocalFilterStats> filter_stats_;
+
+  /// Number of scratch batches processed so far.
+  int64_t scratch_batches_processed_;
 
   /// Column reader for each materialized columns for this file.
   std::vector<ParquetColumnReader*> column_readers_;
@@ -437,6 +441,8 @@ class HdfsParquetScanner : public HdfsScanner {
   ProcessScratchBatchFn codegend_process_scratch_batch_fn_;
 
   const char* filename() const { return metadata_range_->file(); }
+
+  const bool IR_NO_INLINE has_filters() const { return !filter_ctxs_.empty(); }
 
   virtual Status GetNextInternal(RowBatch* row_batch);
 
@@ -477,6 +483,29 @@ class HdfsParquetScanner : public HdfsScanner {
   /// until it is exhausted or the output is full. Called for the case when there are
   /// materialized tuples. This is a separate function so it can be codegened.
   int ProcessScratchBatch(RowBatch* dst_batch);
+
+  /// Evaluates 'row' on the expression referred to by 'expr_ctx' and hashes the resulting
+  /// value which is compared against 'filter'. Returns true if 'row' finds a match
+  /// in 'filter'. Returns false otherwise.
+  static bool EvalOneFilter(
+      ExprContext* expr_ctx, const RuntimeFilter* filter, TupleRow* row);
+
+  /// Evaluates 'row' against the i-th runtime filter for this scan node and returns
+  /// true if 'row' finds a match in the filter. Returns false otherwise.
+  bool EvalRuntimeFilter(int i, TupleRow* row);
+
+  /// Codegen EvalOneFilter() by codegen'ing 'expr' and replacing the expression type
+  /// argument to RuntimeFilter::Eval() with a constant. Returns error status on failure
+  /// to codegen EvalOneFilter().
+  static Status CodegenEvalOneFilter(LlvmCodeGen* codegen, Expr* expr,
+      llvm::Function** fn);
+
+  /// Codegen EvalRuntimeFilters() by unrolling the loop in the interpreted version
+  /// and emitting a customized version of EvalRuntimeFilter() for each filter in
+  /// 'filter_ctxs'. Return error status on failure. The generated function is returned
+  /// via 'fn'.
+  static Status CodegenEvalRuntimeFilters(LlvmCodeGen* codegen,
+      const std::vector<FilterContext>& filter_ctxs, llvm::Function** fn);
 
   /// Evaluates runtime filters (if any) against the given row. Returns true if
   /// they passed, false otherwise. Maintains the runtime filter stats, determines

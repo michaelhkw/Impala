@@ -61,8 +61,7 @@ class RuntimeFilter {
   /// concurrently with SetBloomFilter().
   ///
   /// Templatized in preparation for templatized hashes.
-  template<typename T>
-  inline bool Eval(T* val, const ColumnType& col_type) const;
+  bool Eval(void* val, const ColumnType& col_type) const noexcept;
 
   /// Returns the amount of time waited since registration for the filter to
   /// arrive. Returns 0 if filter has not yet arrived.
@@ -82,6 +81,9 @@ class RuntimeFilter {
 
   /// Frequency with which to check for filter arrival in WaitForArrival()
   static const int SLEEP_PERIOD_MS;
+
+  /// XXX
+  static const char* LLVM_CLASS_NAME;
 
  private:
   /// Membership bloom_filter. May be NULL even after arrival_time_ is set. This is a

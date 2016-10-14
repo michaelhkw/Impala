@@ -328,7 +328,7 @@ void HdfsScanNodeBase::Codegen(RuntimeState* state) {
         status = HdfsAvroScanner::Codegen(this, conjunct_ctxs_, &fn);
         break;
       case THdfsFileFormat::PARQUET:
-        status = HdfsParquetScanner::Codegen(this, conjunct_ctxs_, &fn);
+        status = HdfsParquetScanner::Codegen(this, conjunct_ctxs_, filter_ctxs_, &fn);
         break;
       default:
         // No codegen for this format
@@ -708,7 +708,7 @@ bool HdfsScanNodeBase::PartitionPassesFilters(int32_t partition_id,
     // Not quite right because bitmap could arrive after Eval(), but we're ok with
     // off-by-one errors.
     bool processed = ctx.filter->HasBloomFilter();
-    bool passed_filter = ctx.filter->Eval<void>(e, ctx.expr->root()->type());
+    bool passed_filter = ctx.filter->Eval(e, ctx.expr->root()->type());
     ctx.stats->IncrCounters(stats_name, 1, processed, !passed_filter);
     if (!passed_filter) return false;
   }

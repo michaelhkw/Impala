@@ -241,6 +241,11 @@ class LlvmCodeGen {
   /// Alloca's an instance of the appropriate pointer type and sets it to point at 'v'
   llvm::Value* GetPtrTo(LlvmBuilder* builder, llvm::Value* v, const char* name = "");
 
+  /// Creates a global value with the constant 'ir_constant' and returns
+  /// a pointer to it.
+  llvm::Constant* ConstantToGVPtr(llvm::Type* type, llvm::Constant* ir_constant,
+      const std::string& name);
+
   /// Returns reference to llvm context object.  Each LlvmCodeGen has its own
   /// context to allow multiple threads to be calling into llvm at the same time.
   llvm::LLVMContext& context() { return *context_.get(); }
@@ -282,6 +287,12 @@ class LlvmCodeGen {
   /// Same as ReplaceCallSites(), except replaces the function call instructions with the
   /// boolean value 'constant'.
   int ReplaceCallSitesWithBoolConst(llvm::Function* caller, bool constant,
+      const std::string& target_name);
+
+  /// Replace calls to functions in 'caller' where the callee's name has 'target_name'
+  /// as a substring. Calls to functions are replaced with the value 'replacement'. The
+  /// return value is the number of calls replaced.
+  int ReplaceCallSitesWithValue(llvm::Function* caller, llvm::Value* replacement,
       const std::string& target_name);
 
   /// Returns a copy of fn. The copy is added to the module.
@@ -380,10 +391,10 @@ class LlvmCodeGen {
   llvm::Value* CastPtrToLlvmPtr(llvm::Type* type, const void* ptr);
 
   /// Returns the constant 'val' of 'type'.
-  llvm::Value* GetIntConstant(PrimitiveType type, int64_t val);
+  llvm::Constant* GetIntConstant(PrimitiveType type, int64_t val);
 
   /// Returns the constant 'val' of the int type of size 'byte_size'.
-  llvm::Value* GetIntConstant(int byte_size, int64_t val);
+  llvm::Constant* GetIntConstant(int byte_size, int64_t val);
 
   /// Returns true/false constants (bool type)
   llvm::Value* true_value() { return true_value_; }
@@ -512,12 +523,6 @@ class LlvmCodeGen {
 
   /// Clears generated hash fns.  This is only used for testing.
   void ClearHashFns();
-
-  /// Replace calls to functions in 'caller' where the callee's name has 'target_name'
-  /// as a substring. Calls to functions are replaced with the value 'replacement'. The
-  /// return value is the number of calls replaced.
-  int ReplaceCallSitesWithValue(llvm::Function* caller, llvm::Value* replacement,
-      const std::string& target_name);
 
   /// Finds call instructions in 'caller' where 'target_name' is a substring of the
   /// callee's name. Found instructions are appended to the 'results' vector.

@@ -76,7 +76,7 @@ class BloomFilter {
 
   /// Finds an element in the BloomFilter, returning true if it is found and false (with
   /// high probabilty) if it is not.
-  bool Find(const uint32_t hash) const;
+  bool Find(const uint32_t hash) const noexcept;
 
   /// Computes the logical OR of 'in' with 'out' and stores the result in 'out'.
   static void Or(const TBloomFilter& in, TBloomFilter* out);
@@ -139,8 +139,8 @@ class BloomFilter {
 
   /// BucketFind() and BucketFindAVX2() are just like BucketInsert() and
   /// BucketInsertAVX2(), but for Find().
-  bool BucketFind(const uint32_t bucket_idx, const uint32_t hash) const;
-  bool BucketFindAVX2(const uint32_t bucket_idx, const uint32_t hash) const
+  bool BucketFind(const uint32_t bucket_idx, const uint32_t hash) const noexcept;
+  bool BucketFindAVX2(const uint32_t bucket_idx, const uint32_t hash) const noexcept
       __attribute__((__target__("avx2")));
 
   /// A helper function for the AVX2 methods. Turns a 32-bit hash into a 256-bit Bucket
@@ -182,7 +182,7 @@ inline void ALWAYS_INLINE BloomFilter::Insert(const uint32_t hash) {
   }
 }
 
-inline bool ALWAYS_INLINE BloomFilter::Find(const uint32_t hash) const {
+inline bool ALWAYS_INLINE BloomFilter::Find(const uint32_t hash) const noexcept {
   const uint32_t bucket_idx = HashUtil::Rehash32to32(hash) & directory_mask_;
   if (CpuInfo::IsSupported(CpuInfo::AVX2)) {
     return BucketFindAVX2(bucket_idx, hash);
