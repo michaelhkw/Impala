@@ -29,8 +29,6 @@ using namespace std;
 
 namespace impala {
 
-BloomFilter* const BloomFilter::ALWAYS_TRUE_FILTER = NULL;
-
 constexpr uint32_t BloomFilter::REHASH[8] __attribute__((aligned(32)));
 
 BloomFilter::BloomFilter(const int log_heap_space)
@@ -129,7 +127,7 @@ void BloomFilter::BucketInsertAVX2(
 }
 
 bool BloomFilter::BucketFindAVX2(
-    const uint32_t bucket_idx, const uint32_t hash) const {
+    const uint32_t bucket_idx, const uint32_t hash) const noexcept {
   const __m256i mask = MakeMask(hash);
   const __m256i bucket = reinterpret_cast<__m256i*>(directory_)[bucket_idx];
   // We should return true if 'bucket' has a one wherever 'mask' does. _mm256_testc_si256
@@ -142,7 +140,7 @@ bool BloomFilter::BucketFindAVX2(
 }
 
 bool BloomFilter::BucketFind(
-    const uint32_t bucket_idx, const uint32_t hash) const {
+    const uint32_t bucket_idx, const uint32_t hash) const noexcept {
   for (int i = 0; i < BUCKET_WORDS; ++i) {
     BucketWord hval =
         (REHASH[i] * hash) >> ((1 << LOG_BUCKET_WORD_BITS) - LOG_BUCKET_WORD_BITS);

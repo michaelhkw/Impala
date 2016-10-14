@@ -52,6 +52,7 @@ add_library(Runtime
   row-batch.cc
   runtime-filter.cc
   runtime-filter-bank.cc
+  runtime-filter-ir.cc
   runtime-state.cc
   sorted-run-merger.cc
   sorter.cc
