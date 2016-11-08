@@ -88,12 +88,14 @@ ADD_EXPORTABLE_LIBRARY(krpc
 ### RPC generator tool
 add_executable(protoc-gen-krpc protoc-gen-krpc.cc)
 target_link_libraries(protoc-gen-krpc
-    ${KUDU_BASE_LIBS}
+  ${KUDU_BASE_LIBS}
     rpc_header_proto
     protoc
     protobuf
     gutil
-    kudu_util)
+    kudu_util
+    # Added by Impala: kudu_util depends on libCommon
+    ${IMPALA_LINK_LIBS})
 
 #### RPC test
 PROTOBUF_GENERATE_CPP(
