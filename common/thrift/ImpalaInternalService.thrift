@@ -311,6 +311,11 @@ struct TQueryCtx {
   // Contains only the union of those descriptors referenced by list of fragments destined
   // for a single host. Optional for frontend tests.
   12: optional Descriptors.TDescriptorTable desc_tbl
+
+  // Hint to disable codegen. Set by planner for single-node optimization or by the
+  // backend in NativeEvalConstExprs() in FESupport. This flag is only advisory to
+  // avoid the overhead of codegen and can be ignored if codegen is needed functionally.
+  13: optional bool disable_codegen_hint = false;
 }
 
 // Context to collect information, which is shared among all instances of that plan
