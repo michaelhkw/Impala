@@ -37,6 +37,7 @@ class Value;
 
 namespace impala {
 
+class AggFn;
 class AggFnEvaluator;
 class CodegenAnyVal;
 class LlvmCodeGen;
@@ -139,7 +140,7 @@ class PartitionedAggregationNode : public ExecNode {
   static const char* LLVM_CLASS_NAME;
 
  protected:
-  /// Frees local allocations from aggregate_evaluators_ and agg_fn_ctxs
+  /// Frees local allocations from aggregate_evaluators_ and agg_fn_evaluators
   virtual Status QueryMaintenance(RuntimeState* state);
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
@@ -180,6 +181,9 @@ class PartitionedAggregationNode : public ExecNode {
   TupleDescriptor* intermediate_tuple_desc_;
 
   /// Row with the intermediate tuple as its only tuple.
+  /// Construct a new row desc for preparing the build exprs because neither the child's
+  /// nor this node's output row desc may contain the intermediate tuple, e.g.,
+  /// in a single-node plan with an intermediate tuple different from the output tuple.
   boost::scoped_ptr<RowDescriptor> intermediate_row_desc_;
 
   /// Tuple into which Finalize() results are stored. Possibly the same as
@@ -195,39 +199,32 @@ class PartitionedAggregationNode : public ExecNode {
 
   /// True if this is first phase of a two-phase distributed aggregation for which we
   /// are doing a streaming preaggregation.
-  bool is_streaming_preagg_;
+  const bool is_streaming_preagg_;
 
   /// True if any of the evaluators require the serialize step.
   bool needs_serialize_;
 
   /// The list of all aggregate operations for this exec node.
-  std::vector<AggFnEvaluator*> aggregate_evaluators_;
+  std::vector<AggFn*> agg_fns_;
 
-  /// Cache of the ExprContexts of 'aggregate_evaluators_'. Used in the codegen'ed
-  /// version of UpdateTuple() to avoid loading aggregate_evaluators_[i] at runtime.
-  /// An entry is NULL if the aggregate evaluator is not codegen'ed or there is no Expr
-  /// in the aggregate evaluator (e.g. count(*)).
-  std::vector<ExprContext* const*> agg_expr_ctxs_;
-
-  /// FunctionContext for each aggregate function and backing MemPool. String data
-  /// returned by the aggregate functions is allocated via these contexts.
-  /// These contexts are only passed to the evaluators in the non-partitioned
-  /// (non-grouping) case. Otherwise they are only used to clone FunctionContexts for the
-  /// partitions.
+  /// Evaluators for each aggregate function and backing MemPool. String data
+  /// returned by the aggregate functions is allocated via these evaluators.
+  /// These evaluatorss are only used for the non-grouping cases. For queries
+  /// with the group-by clause, each partition will clone these evaluators.
   /// TODO: we really need to plumb through CHAR(N) for intermediate types.
-  std::vector<impala_udf::FunctionContext*> agg_fn_ctxs_;
+  std::vector<AggFnEvaluator*> agg_fn_evaluators_;
   boost::scoped_ptr<MemPool> agg_fn_pool_;
 
   /// Exprs used to evaluate input rows
-  std::vector<ExprContext*> grouping_expr_ctxs_;
+  std::vector<ScalarExpr*> grouping_exprs_;
 
   /// Exprs used to insert constructed aggregation tuple into the hash table.
   /// All the exprs are simply SlotRefs for the intermediate tuple.
-  std::vector<ExprContext*> build_expr_ctxs_;
+  std::vector<ScalarExpr*> build_exprs_;
 
-  /// Indices of grouping exprs with var-len string types in grouping_expr_ctxs_. We need
-  /// to do more work for var-len expressions when allocating and spilling rows. All
-  /// var-len grouping exprs have type string.
+  /// Indices of grouping exprs with var-len string types in grouping_exprs_.
+  /// We need to do more work for var-len expressions when allocating and spilling rows.
+  /// All var-len grouping exprs have type string.
   std::vector<int> string_grouping_exprs_;
 
   RuntimeState* state_;
@@ -325,6 +322,8 @@ class PartitionedAggregationNode : public ExecNode {
   bool child_eos_;
 
   /// Used for hash-related functionality, such as evaluating rows and calculating hashes.
+  /// It also owns the evaluators for the grouping and build expressions used during hash
+  /// table insertion and probing.
   boost::scoped_ptr<HashTableCtx> ht_ctx_;
 
   /// Object pool that holds the Partition objects in hash_partitions_.
@@ -395,8 +394,8 @@ class PartitionedAggregationNode : public ExecNode {
     /// is spilled).
     boost::scoped_ptr<HashTable> hash_tbl;
 
-    /// Clone of parent's agg_fn_ctxs_ and backing MemPool.
-    std::vector<impala_udf::FunctionContext*> agg_fn_ctxs;
+    /// Clone of parent's agg_fn_evaluators_ and backing MemPool.
+    std::vector<AggFnEvaluator*> agg_fn_evaluators;
     boost::scoped_ptr<MemPool> agg_fn_pool;
 
     /// Tuple stream used to store aggregated rows. When the partition is not spilled,
@@ -436,50 +435,48 @@ class PartitionedAggregationNode : public ExecNode {
       int first_row_idx, MemPool* pool);
 
   /// Constructs singleton output tuple, allocating memory from pool.
-  Tuple* ConstructSingletonOutputTuple(
-      const std::vector<impala_udf::FunctionContext*>& agg_fn_ctxs, MemPool* pool);
+  Tuple* ConstructSingletonOutputTuple(std::vector<AggFnEvaluator*>& agg_fn_evaluators,
+      MemPool* pool);
 
   /// Copies grouping values stored in 'ht_ctx_' that were computed over 'current_row_'
-  /// using 'grouping_expr_ctxs_'. Aggregation expr slots are set to their initial values.
-  /// Returns NULL if there was not enough memory to allocate the tuple or an error
-  /// occurred. When returning NULL, sets *status.  Allocates tuple and var-len data for
+  /// using 'grouping_expr_evaluators_'. Aggregation expr slots are set to their initial
+  /// values. Returns NULL if there was not enough memory to allocate the tuple or errors
+  /// occurred. In which case, 'status' is set. Allocates tuple and var-len data for
   /// grouping exprs from stream. Var-len data for aggregate exprs is allocated from the
   /// FunctionContexts, so is stored outside the stream. If stream's small buffers get
   /// full, it will attempt to switch to IO-buffers.
-  Tuple* ConstructIntermediateTuple(
-      const std::vector<impala_udf::FunctionContext*>& agg_fn_ctxs,
+  Tuple* ConstructIntermediateTuple(std::vector<AggFnEvaluator*>& agg_fn_evaluators,
       BufferedTupleStream* stream, Status* status) noexcept;
 
   /// Constructs intermediate tuple, allocating memory from pool instead of the stream.
   /// Returns NULL and sets status if there is not enough memory to allocate the tuple.
-  Tuple* ConstructIntermediateTuple(
-      const std::vector<impala_udf::FunctionContext*>& agg_fn_ctxs, MemPool* pool,
-      Status* status) noexcept;
+  Tuple* ConstructIntermediateTuple(std::vector<AggFnEvaluator*>& agg_fn_evaluators,
+      MemPool* pool, Status* status) noexcept;
 
   /// Returns the number of bytes of variable-length data for the grouping values stored
   /// in 'ht_ctx_'.
   int GroupingExprsVarlenSize();
 
   /// Initializes intermediate tuple by copying grouping values stored in 'ht_ctx_' that
-  /// that were computed over 'current_row_' using 'grouping_expr_ctxs_'. Writes the
+  /// that were computed over 'current_row_' using 'grouping_expr_evaluators_'. Writes the
   /// var-len data into buffer. 'buffer' points to the start of a buffer of at least the
   /// size of the variable-length data: 'varlen_size'.
   void CopyGroupingValues(Tuple* intermediate_tuple, uint8_t* buffer, int varlen_size);
 
   /// Initializes the aggregate function slots of an intermediate tuple.
   /// Any var-len data is allocated from the FunctionContexts.
-  void InitAggSlots(const vector<impala_udf::FunctionContext*>& agg_fn_ctxs,
+  void InitAggSlots(vector<AggFnEvaluator*>& agg_fn_evaluators,
       Tuple* intermediate_tuple);
 
   /// Updates the given aggregation intermediate tuple with aggregation values computed
-  /// over 'row' using 'agg_fn_ctxs'. Whether the agg fn evaluator calls Update() or
+  /// over 'row' using 'agg_fn_evaluators'. Whether the agg fn evaluator calls Update() or
   /// Merge() is controlled by the evaluator itself, unless enforced explicitly by passing
   /// in is_merge == true.  The override is needed to merge spilled and non-spilled rows
   /// belonging to the same partition independent of whether the agg fn evaluators have
   /// is_merge() == true.
   /// This function is replaced by codegen (which is why we don't use a vector argument
-  /// for agg_fn_ctxs).. Any var-len data is allocated from the FunctionContexts.
-  void UpdateTuple(impala_udf::FunctionContext** agg_fn_ctxs, Tuple* tuple, TupleRow* row,
+  /// for agg_fn_evaluators).. Any var-len data is allocated from the FunctionContexts.
+  void UpdateTuple(AggFnEvaluator** agg_fn_evaluators, Tuple* tuple, TupleRow* row,
       bool is_merge = false) noexcept;
 
   /// Called on the intermediate tuple of each group after all input rows have been
@@ -491,7 +488,7 @@ class PartitionedAggregationNode : public ExecNode {
   /// the finalized/serialized aggregate values is returned.
   /// TODO: Coordinate the allocation of new tuples with the release of memory
   /// so as not to make memory consumption blow up.
-  Tuple* GetOutputTuple(const std::vector<impala_udf::FunctionContext*>& agg_fn_ctxs,
+  Tuple* GetOutputTuple(vector<AggFnEvaluator*>& agg_fn_evaluators,
       Tuple* tuple, MemPool* pool);
 
   /// Do the aggregation for all tuple rows in the batch when there is no grouping.
@@ -530,7 +527,7 @@ class PartitionedAggregationNode : public ExecNode {
   /// Accessor for the expression contexts of an AggFnEvaluator. Returns an array of
   /// pointers the the AggFnEvaluator's expression contexts. Used only in codegen'ed
   /// version of UpdateTuple().
-  ExprContext* const* IR_ALWAYS_INLINE GetAggExprContexts(int i) const;
+  ScalarExprEvaluator* const* IR_ALWAYS_INLINE GetAggScalarExprEvaluators(int i) const;
 
   /// Create a new intermediate tuple in partition, initialized with row. ht_ctx is
   /// the context for the partition's hash table and hash is the precomputed hash of
@@ -637,23 +634,22 @@ class PartitionedAggregationNode : public ExecNode {
   void ClosePartitions();
 
   /// Calls finalizes on all tuples starting at 'it'.
-  void CleanupHashTbl(const std::vector<impala_udf::FunctionContext*>& agg_fn_ctxs,
+  void CleanupHashTbl(std::vector<AggFnEvaluator*>& agg_fn_evaluators,
       HashTable::Iterator it);
 
   /// Codegen UpdateSlot(). Returns non-OK status if codegen is unsuccessful.
   /// Assumes is_merge = false;
-  Status CodegenUpdateSlot(LlvmCodeGen* codegen, AggFnEvaluator* evaluator,
-      int evaluator_idx, SlotDescriptor* slot_desc, llvm::Function** fn);
+  Status CodegenUpdateSlot(LlvmCodeGen* codegen, int agg_fn_idx,
+      SlotDescriptor* slot_desc, llvm::Function** fn);
 
   /// Codegen a call to a function implementing the UDA interface with input values
   /// from 'input_vals'. 'dst_val' should contain the previous value of the aggregate
   /// function, and 'updated_dst_val' is set to the new value after the Update or Merge
   /// operation is applied. The instruction sequence for the UDA call is inserted at
   /// the insert position of 'builder'.
-  Status CodegenCallUda(LlvmCodeGen* codegen, LlvmBuilder* builder,
-      AggFnEvaluator* evaluator, llvm::Value* agg_fn_ctx_arg,
-      const std::vector<CodegenAnyVal>& input_vals, const CodegenAnyVal& dst_val,
-      CodegenAnyVal* updated_dst_val);
+  Status CodegenCallUda(LlvmCodeGen* codegen, LlvmBuilder* builder, AggFn* agg_fn,
+      llvm::Value* agg_fn_ctx_arg, const std::vector<CodegenAnyVal>& input_vals,
+      const CodegenAnyVal& dst_val, CodegenAnyVal* updated_dst_val);
 
   /// Codegen UpdateTuple(). Returns non-OK status if codegen is unsuccessful.
   Status CodegenUpdateTuple(LlvmCodeGen* codegen, llvm::Function** fn);

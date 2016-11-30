@@ -24,8 +24,8 @@
 #include <boost/scoped_ptr.hpp>
 #include <ostream>
 
-#include "common/status.h"
 #include "common/global-types.h"
+#include "common/status.h"
 #include "runtime/types.h"
 
 #include "gen-cpp/Descriptors_types.h"  // for TTupleId
@@ -40,12 +40,12 @@ namespace llvm {
 
 namespace impala {
 
-class Expr;
-class ExprContext;
 class LlvmBuilder;
 class LlvmCodeGen;
 class ObjectPool;
 class RuntimeState;
+class ScalarExpr;
+class ScalarExprEvaluator;
 class TDescriptorTable;
 class TSlotDescriptor;
 class TTable;
@@ -190,7 +190,7 @@ class SlotDescriptor {
   SlotDescriptor(const TSlotDescriptor& tdesc, const TupleDescriptor* parent,
       const TupleDescriptor* collection_item_descriptor);
 
-  /// Generate LLVM code at the insert position of 'builder' to get the i8 value of the
+  /// Generate LLVM code at the insert position of 'builder' to get the i8 value of
   /// the byte containing 'null_indicator_offset' in 'tuple'. If 'null_byte_ptr' is
   /// non-NULL, sets that to a pointer to the null byte.
   static llvm::Value* CodegenGetNullByte(LlvmCodeGen* codegen, LlvmBuilder* builder,
@@ -260,14 +260,16 @@ class HdfsPartitionDescriptor {
   int64_t id() const { return id_; }
   std::string DebugString() const;
 
-  /// It is safe to evaluate the returned expr contexts concurrently from multiple
+  /// It is safe to call the returned expr evaluators concurrently from multiple
   /// threads because all exprs are literals, after the descriptor table has been
   /// opened.
-  const std::vector<ExprContext*>& partition_key_value_ctxs() const {
-    return partition_key_value_ctxs_;
+  const std::vector<ScalarExprEvaluator*>& partition_key_value_evaluators() const {
+    return partition_key_value_evaluators_;
   }
 
  private:
+  friend class DescriptorTbl;
+
   char line_delim_;
   char field_delim_;
   char collection_delim_;
@@ -284,7 +286,9 @@ class HdfsPartitionDescriptor {
   /// because the same partition descriptor may be used by multiple exec nodes with
   /// different lifetimes.
   /// TODO: Move these into the new query-wide state, indexed by partition id.
-  std::vector<ExprContext*> partition_key_value_ctxs_;
+  const std::vector<TExpr>& thrift_partition_key_exprs_;
+
+  std::vector<ScalarExprEvaluator*> partition_key_value_evaluators_;
 
   /// The format (e.g. text, sequence file etc.) of data in the files in this partition
   THdfsFileFormat::type file_format_;
@@ -459,7 +463,7 @@ class DescriptorTbl {
   /// Creates a descriptor tbl within 'pool' from thrift_tbl and returns it via 'tbl'.
   /// Returns OK on success, otherwise error (in which case 'tbl' will be unset).
   static Status Create(ObjectPool* pool, const TDescriptorTable& thrift_tbl,
-                       DescriptorTbl** tbl);
+      DescriptorTbl** tbl);
 
   /// Prepares and opens partition exprs of Hdfs tables.
   Status PrepareAndOpenPartitionExprs(RuntimeState* state) const;

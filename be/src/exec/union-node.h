@@ -28,7 +28,9 @@
 namespace impala {
 
 class DescriptorTbl;
-class ExprContext;
+class RuntimeState;
+class ScalarExpr;
+class ScalarExprEvaluator;
 class Tuple;
 class TupleRow;
 class TPlanNode;
@@ -65,10 +67,12 @@ class UnionNode : public ExecNode {
 
   /// Const exprs materialized by this node. These exprs don't refer to any children.
   /// Only materialized by the first fragment instance to avoid duplication.
-  std::vector<std::vector<ExprContext*>> const_expr_lists_;
+  std::vector<std::vector<ScalarExpr*>> const_exprs_list_;
+  std::vector<std::vector<ScalarExprEvaluator*>> const_expr_evaluators_list_;
 
   /// Exprs materialized by this node. The i-th result expr list refers to the i-th child.
-  std::vector<std::vector<ExprContext*>> child_expr_lists_;
+  std::vector<std::vector<ScalarExpr*>> child_exprs_list_;
+  std::vector<std::vector<ScalarExprEvaluator*>> child_expr_evaluators_list_;
 
   /////////////////////////////////////////
   /// BEGIN: Members that must be Reset()
@@ -109,7 +113,7 @@ class UnionNode : public ExecNode {
 
   /// Evaluates 'exprs' over 'row', materializes the results in 'tuple_buf'.
   /// and appends the new tuple to 'dst_batch'. Increments 'num_rows_returned_'.
-  inline void MaterializeExprs(const std::vector<ExprContext*>& exprs,
+  inline void MaterializeExprs(const std::vector<ScalarExprEvaluator*>& evaluators,
       TupleRow* row, uint8_t* tuple_buf, RowBatch* dst_batch);
 
   /// Returns true if the child at 'child_idx' can be passed through.
@@ -133,7 +137,7 @@ class UnionNode : public ExecNode {
   /// Returns true if there are still rows to be returned from constant expressions.
   inline bool HasMoreConst(const RuntimeState* state) const {
     return state->instance_ctx().per_fragment_instance_idx == 0 &&
-        const_expr_list_idx_ < const_expr_lists_.size();
+        const_expr_list_idx_ < const_exprs_list_.size();
   }
 
 };

@@ -32,7 +32,7 @@
 #include "exec/hdfs-scan-node.h"
 #include "exec/plan-root-sink.h"
 #include "exec/scan-node.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "runtime/data-stream-mgr.h"
 #include "runtime/descriptors.h"
 #include "runtime/mem-tracker.h"
@@ -219,7 +219,7 @@ Status PlanFragmentExecutor::PrepareInternal(
 
   DCHECK(fragment_ctx.fragment.__isset.output_sink);
   RETURN_IF_ERROR(
-      DataSink::CreateDataSink(obj_pool(), fragment_ctx.fragment.output_sink,
+      DataSink::CreateDataSink(runtime_state(), fragment_ctx.fragment.output_sink,
           fragment_ctx.fragment.output_exprs, instance_ctx, exec_tree_->row_desc(),
           &sink_));
   RETURN_IF_ERROR(

@@ -24,7 +24,6 @@
 
 #include "codegen/impala-ir.h"
 #include "exec/exec-node.h"
-#include "exec/sort-exec-exprs.h"
 #include "runtime/descriptors.h"  // for TupleId
 #include "util/tuple-row-compare.h"
 
@@ -52,6 +51,7 @@ class TopNNode : public ExecNode {
   virtual void Close(RuntimeState* state);
 
  protected:
+  virtual Status QueryMaintenance(RuntimeState* state);
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
  private:
@@ -71,9 +71,13 @@ class TopNNode : public ExecNode {
   /// Number of rows to skip.
   int64_t offset_;
 
-  /// sort_exec_exprs_ contains the ordering expressions used for tuple comparison and
-  /// the materialization exprs for the output tuple.
-  SortExecExprs sort_exec_exprs_;
+  /// Ordering expressions used for tuple comparison.
+  std::vector<ScalarExpr*> ordering_exprs_;
+
+  /// Materialization exprs for the output tuple and their evaluators.
+  std::vector<ScalarExpr*> slot_materialize_exprs_;
+  std::vector<ScalarExprEvaluator*> slot_materialize_expr_evaluators_;
+
   std::vector<bool> is_asc_order_;
   std::vector<bool> nulls_first_;
 

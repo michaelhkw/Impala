@@ -40,12 +40,12 @@ class HdfsTableWriter {
   /// output_partition -- Information on the output partition file.
   /// partition -- the descriptor for the partition being written
   /// table_desc -- the descriptor for the table being written.
-  /// output_exprs -- expressions which generate the output values.
+  /// output_expr_evaluators -- expression evaluators which generate the output values.
   HdfsTableWriter(HdfsTableSink* parent,
                   RuntimeState* state, OutputPartition* output_partition,
                   const HdfsPartitionDescriptor* partition_desc,
                   const HdfsTableDescriptor* table_desc,
-                  const std::vector<ExprContext*>& output_expr_ctxs);
+                  std::vector<ScalarExprEvaluator*>& output_expr_evaluators);
 
   virtual ~HdfsTableWriter() { }
 
@@ -123,8 +123,9 @@ class HdfsTableWriter {
   /// Table descriptor of table to be written.
   const HdfsTableDescriptor* table_desc_;
 
-  /// Expressions that materialize output values.
-  std::vector<ExprContext*> output_expr_ctxs_;
+  /// Reference to the evaluators of expressions which generate the output value.
+  /// The evaluators are owned by sink which owns this table writer.
+  std::vector<ScalarExprEvaluator*>& output_expr_evaluators_;
 
   /// Subclass should populate any file format specific stats.
   TInsertStats stats_;

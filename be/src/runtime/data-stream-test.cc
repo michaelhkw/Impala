@@ -117,6 +117,7 @@ class DataStreamTest : public testing::Test {
     // Initialize MemTrackers and RuntimeState for use by the data stream receiver.
     exec_env_.InitForFeTests();
     runtime_state_.reset(new RuntimeState(TQueryCtx(), &exec_env_, "test-pool"));
+    mem_pool_.reset(new MemPool(&tracker_));
 
     // Stop tests that rely on mismatched sender / receiver pairs timing out from failing.
     FLAGS_datastream_sender_timeout_ms = 250;
@@ -160,20 +161,28 @@ class DataStreamTest : public testing::Test {
     StartBackend();
   }
 
-  const TDataStreamSink& GetSink(TPartitionType::type partition_type) {
+  const TDataSink GetSink(TPartitionType::type partition_type) {
+    TDataSink tdata_sink;
     switch (partition_type) {
-      case TPartitionType::UNPARTITIONED: return broadcast_sink_;
-      case TPartitionType::RANDOM: return random_sink_;
-      case TPartitionType::HASH_PARTITIONED: return hash_sink_;
-      default: EXPECT_TRUE(false) << "Unhandled sink type: " << partition_type;
+      case TPartitionType::UNPARTITIONED:
+        tdata_sink.__set_stream_sink(broadcast_sink_);
+        break;
+      case TPartitionType::RANDOM:
+        tdata_sink.__set_stream_sink(random_sink_);
+        break;
+      case TPartitionType::HASH_PARTITIONED:
+        tdata_sink.__set_stream_sink(hash_sink_);
+        break;
+      default:
+        EXPECT_TRUE(false) << "Unhandled sink type: " << partition_type;
     }
-    // Should never reach this.
-    return broadcast_sink_;
+    return tdata_sink;
   }
 
   virtual void TearDown() {
-    lhs_slot_ctx_->Close(NULL);
-    rhs_slot_ctx_->Close(NULL);
+    less_than_->Close(runtime_state_.get());
+    ScalarExpr::Close(ordering_exprs_);
+    mem_pool_->FreeAll();
     exec_env_.impalad_client_cache()->TestShutdown();
     StopBackend();
   }
@@ -186,6 +195,7 @@ class DataStreamTest : public testing::Test {
 
   ObjectPool obj_pool_;
   MemTracker tracker_;
+  scoped_ptr<MemPool> mem_pool_;
   DescriptorTbl* desc_tbl_;
   const RowDescriptor* row_desc_;
   TupleRowComparator* less_than_;
@@ -193,6 +203,8 @@ class DataStreamTest : public testing::Test {
   scoped_ptr<RuntimeState> runtime_state_;
   TUniqueId next_instance_id_;
   string stmt_;
+
+  vector<ScalarExpr*> ordering_exprs_;
 
   // RowBatch generation
   scoped_ptr<RowBatch> batch_;
@@ -214,7 +226,7 @@ class DataStreamTest : public testing::Test {
     Status status;
     int num_bytes_sent;
 
-    SenderInfo(): thread_handle(NULL), num_bytes_sent(0) {}
+    SenderInfo(): thread_handle(nullptr), num_bytes_sent(0) {}
   };
   vector<SenderInfo> sender_info_;
 
@@ -233,7 +245,7 @@ class DataStreamTest : public testing::Test {
       : stream_type(stream_type),
         num_senders(num_senders),
         receiver_num(receiver_num),
-        thread_handle(NULL),
+        thread_handle(nullptr),
         num_rows_received(0) {}
 
     ~ReceiverInfo() {
@@ -288,19 +300,11 @@ class DataStreamTest : public testing::Test {
   // Create a tuple comparator to sort in ascending order on the single bigint column.
   void CreateTupleComparator() {
     SlotRef* lhs_slot = obj_pool_.Add(new SlotRef(TYPE_BIGINT, 0));
-    lhs_slot_ctx_ = obj_pool_.Add(new ExprContext(lhs_slot));
-    SlotRef* rhs_slot = obj_pool_.Add(new SlotRef(TYPE_BIGINT, 0));
-    rhs_slot_ctx_ = obj_pool_.Add(new ExprContext(rhs_slot));
-
-    lhs_slot_ctx_->Prepare(NULL, *row_desc_, &tracker_);
-    rhs_slot_ctx_->Prepare(NULL, *row_desc_, &tracker_);
-    lhs_slot_ctx_->Open(NULL);
-    rhs_slot_ctx_->Open(NULL);
-    SortExecExprs* sort_exprs = obj_pool_.Add(new SortExecExprs());
-    sort_exprs->Init(
-        vector<ExprContext*>(1, lhs_slot_ctx_), vector<ExprContext*>(1, rhs_slot_ctx_));
-    less_than_ = obj_pool_.Add(new TupleRowComparator(
-        *sort_exprs, vector<bool>(1, true), vector<bool>(1, false)));
+    ASSERT_OK(lhs_slot->Init(runtime_state_.get(), RowDescriptor()));
+    ordering_exprs_.push_back(lhs_slot);
+    less_than_ = obj_pool_.Add(new TupleRowComparator(ordering_exprs_,
+        vector<bool>(1, true), vector<bool>(1, false)));
+    less_than_->Open(&obj_pool_, runtime_state_.get(), mem_pool_.get());
   }
 
   // Create batch_, but don't fill it with data yet. Assumes we created row_desc_.
@@ -328,7 +332,7 @@ class DataStreamTest : public testing::Test {
 
   // Start receiver (expecting given number of senders) in separate thread.
   void StartReceiver(TPartitionType::type stream_type, int num_senders, int receiver_num,
-                     int buffer_size, bool is_merging, TUniqueId* out_id = NULL) {
+      int buffer_size, bool is_merging, TUniqueId* out_id = nullptr) {
     VLOG_QUERY << "start receiver";
     RuntimeProfile* profile =
         obj_pool_.Add(new RuntimeProfile(&obj_pool_, "TestReceiver"));
@@ -344,7 +348,7 @@ class DataStreamTest : public testing::Test {
       info.thread_handle = new thread(&DataStreamTest::ReadStreamMerging, this, &info,
           profile);
     }
-    if (out_id != NULL) *out_id = instance_id;
+    if (out_id != nullptr) *out_id = instance_id;
   }
 
   void JoinReceivers() {
@@ -360,7 +364,7 @@ class DataStreamTest : public testing::Test {
     RowBatch* batch;
     VLOG_QUERY <<  "start reading";
     while (!(info->status = info->stream_recvr->GetBatch(&batch)).IsCancelled() &&
-        (batch != NULL)) {
+        (batch != nullptr)) {
       VLOG_QUERY << "read batch #rows=" << batch->num_rows();
       for (int i = 0; i < batch->num_rows(); ++i) {
         TupleRow* row = batch->GetRow(i);
@@ -449,7 +453,7 @@ class DataStreamTest : public testing::Test {
   void StartBackend() {
     boost::shared_ptr<ImpalaTestBackend> handler(new ImpalaTestBackend(stream_mgr_));
     boost::shared_ptr<TProcessor> processor(new ImpalaInternalServiceProcessor(handler));
-    server_ = new ThriftServer("DataStreamTest backend", processor, FLAGS_port, NULL);
+    server_ = new ThriftServer("DataStreamTest backend", processor, FLAGS_port, nullptr);
     server_->Start();
   }
 
@@ -483,9 +487,15 @@ class DataStreamTest : public testing::Test {
     RuntimeState state(TQueryCtx(), &exec_env_, "test-pool");
     state.set_desc_tbl(desc_tbl_);
     VLOG_QUERY << "create sender " << sender_num;
-    const TDataStreamSink& sink = GetSink(partition_type);
-    DataStreamSender sender(
-        &obj_pool_, sender_num, *row_desc_, sink, dest_, channel_buffer_size);
+    const TDataSink& sink = GetSink(partition_type);
+    DataStreamSender sender(sender_num, *row_desc_, sink, dest_, channel_buffer_size);
+
+    TExprNode expr_node;
+    expr_node.node_type = TExprNodeType::SLOT_REF;
+    TExpr output_exprs;
+    output_exprs.nodes.push_back(expr_node);
+    EXPECT_OK(sender.Init(&state, sink, vector<TExpr>({output_exprs})));
+
     EXPECT_OK(sender.Prepare(&state, &tracker_));
     EXPECT_OK(sender.Open(&state));
     scoped_ptr<RowBatch> batch(CreateRowBatch());
@@ -523,10 +533,6 @@ class DataStreamTest : public testing::Test {
     JoinReceivers();
     CheckReceivers(stream_type, num_senders);
   }
-
- private:
-  ExprContext* lhs_slot_ctx_;
-  ExprContext* rhs_slot_ctx_;
 };
 
 TEST_F(DataStreamTest, UnknownSenderSmallResult) {

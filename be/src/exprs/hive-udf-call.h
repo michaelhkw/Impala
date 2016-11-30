@@ -23,14 +23,15 @@
 #include <string>
 #include <boost/scoped_ptr.hpp>
 
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 
 using namespace impala_udf;
 
 namespace impala {
 
-class TExprNode;
 class RuntimeState;
+class ScalarExprEvaluator;
+class TExprNode;
 
 /// Executor for hive udfs using JNI. This works with the UdfExecutor on the
 /// java side which calls into the actual UDF.
@@ -58,44 +59,48 @@ class RuntimeState;
 /// The BE reads the StringValue as normal.
 //
 /// If the UDF ran into an error, the FE throws an exception.
-class HiveUdfCall : public Expr {
+class HiveUdfCall : public ScalarExpr {
  public:
   /// Must be called before creating any HiveUdfCall instances. This is called at impalad
   /// startup time.
-  static Status Init();
+  static Status InitEnv();
 
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
-  virtual Status Open(RuntimeState* state, ExprContext* context,
-      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
-  virtual void Close(RuntimeState* state, ExprContext* context,
-      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
-
-  virtual BooleanVal GetBooleanVal(ExprContext* ctx, const TupleRow*);
-  virtual TinyIntVal GetTinyIntVal(ExprContext* ctx, const TupleRow*);
-  virtual SmallIntVal GetSmallIntVal(ExprContext* ctx, const TupleRow*);
-  virtual IntVal GetIntVal(ExprContext* ctx, const TupleRow*);
-  virtual BigIntVal GetBigIntVal(ExprContext* ctx, const TupleRow*);
-  virtual FloatVal GetFloatVal(ExprContext* ctx, const TupleRow*);
-  virtual DoubleVal GetDoubleVal(ExprContext* ctx, const TupleRow*);
-  virtual StringVal GetStringVal(ExprContext* ctx, const TupleRow*);
-  virtual TimestampVal GetTimestampVal(ExprContext* ctx, const TupleRow*);
-  virtual DecimalVal GetDecimalVal(ExprContext* ctx, const TupleRow*);
-
-  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
+  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn) override;
+  virtual std::string DebugString() const override;
 
  protected:
-  friend class Expr;
+  friend class ScalarExpr;
+  friend class ScalarExprEvaluator;
   friend class StringFunctions;
 
-  HiveUdfCall(const TExprNode& node);
-  virtual std::string DebugString() const;
+  HiveUdfCall(const TExprNode& node, int fn_ctx_idx);
+
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc) override;
+  virtual Status OpenEvaluator(RuntimeState* state, ScalarExprEvaluator* evaluator,
+      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL)
+      const override;
+  virtual void CloseEvaluator(RuntimeState* state, ScalarExprEvaluator* evaluator,
+      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL)
+      const override;
+
+  virtual BooleanVal GetBooleanVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual TinyIntVal GetTinyIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual SmallIntVal GetSmallIntVal(
+      ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual IntVal GetIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual BigIntVal GetBigIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual FloatVal GetFloatVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual DoubleVal GetDoubleVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual StringVal GetStringVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual TimestampVal GetTimestampVal(
+      ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual DecimalVal GetDecimalVal(ScalarExprEvaluator*, const TupleRow*) const override;
 
  private:
   /// Evalutes the UDF over row. Returns the result as an AnyVal. This function
   /// never returns NULL but rather an AnyVal object with is_null set to true on
   /// error.
-  AnyVal* Evaluate(ExprContext* ctx, const TupleRow* row);
+  AnyVal* Evaluate(ScalarExprEvaluator* evaluator, const TupleRow* row) const;
 
   /// The path on the local FS to the UDF's jar
   std::string local_location_;

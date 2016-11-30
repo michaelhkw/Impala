@@ -27,9 +27,11 @@
 
 #include "codegen/llvm-codegen.h"
 #include "common/object-pool.h"
+#include "common/status.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "gen-cpp/Descriptors_types.h"
 #include "gen-cpp/PlanNodes_types.h"
-#include "exprs/expr.h"
 #include "runtime/runtime-state.h"
 
 #include "common/names.h"
@@ -181,17 +183,10 @@ HdfsPartitionDescriptor::HdfsPartitionDescriptor(const THdfsTable& thrift_table,
     escape_char_(thrift_partition.escapeChar),
     block_size_(thrift_partition.blockSize),
     id_(thrift_partition.id),
+    thrift_partition_key_exprs_(thrift_partition.partitionKeyExprs),
     file_format_(thrift_partition.fileFormat),
     object_pool_(pool) {
   DecompressLocation(thrift_table, thrift_partition, &location_);
-  for (int i = 0; i < thrift_partition.partitionKeyExprs.size(); ++i) {
-    ExprContext* ctx;
-    // TODO: Move to dedicated Init method and treat Status return correctly
-    Status status = Expr::CreateExprTree(object_pool_,
-        thrift_partition.partitionKeyExprs[i], &ctx);
-    DCHECK(status.ok());
-    partition_key_value_ctxs_.push_back(ctx);
-  }
 }
 
 string HdfsPartitionDescriptor::DebugString() const {
@@ -479,7 +474,7 @@ string RowDescriptor::DebugString() const {
 }
 
 Status DescriptorTbl::Create(ObjectPool* pool, const TDescriptorTable& thrift_tbl,
-                             DescriptorTbl** tbl) {
+    DescriptorTbl** tbl) {
   *tbl = pool->Add(new DescriptorTbl());
   // deserialize table descriptors first, they are being referenced by tuple descriptors
   for (size_t i = 0; i < thrift_tbl.tableDescriptors.size(); ++i) {
@@ -534,11 +529,18 @@ Status DescriptorTbl::PrepareAndOpenPartitionExprs(RuntimeState* state) const {
     if (tbl_entry.second->type() != TTableType::HDFS_TABLE) continue;
     HdfsTableDescriptor* hdfs_tbl = static_cast<HdfsTableDescriptor*>(tbl_entry.second);
     for (const auto& part_entry : hdfs_tbl->partition_descriptors()) {
-      // TODO: RowDescriptor should arguably be optional in Prepare for known literals
-      // Partition exprs are not used in the codegen case.  Don't codegen them.
-      RETURN_IF_ERROR(Expr::Prepare(part_entry.second->partition_key_value_ctxs(), state,
-          RowDescriptor(), state->instance_mem_tracker()));
-      RETURN_IF_ERROR(Expr::Open(part_entry.second->partition_key_value_ctxs(), state));
+      HdfsPartitionDescriptor* part_desc = part_entry.second;
+      vector<ScalarExpr*> partition_key_value_exprs;
+      RETURN_IF_ERROR(ScalarExpr::Create(state->obj_pool(), state, RowDescriptor(),
+          part_desc->thrift_partition_key_exprs_, &partition_key_value_exprs));
+      for (const ScalarExpr* partition_expr : partition_key_value_exprs) {
+        DCHECK(partition_expr->IsLiteral());
+        DCHECK_EQ(partition_expr->GetNumChildren(), 0);
+      }
+      RETURN_IF_ERROR(ScalarExprEvaluator::Create(state->obj_pool(), state, nullptr,
+          partition_key_value_exprs, &part_desc->partition_key_value_evaluators_));
+      RETURN_IF_ERROR(ScalarExprEvaluator::Open(
+          part_desc->partition_key_value_evaluators_, state));
     }
   }
   return Status::OK();
@@ -549,7 +551,10 @@ void DescriptorTbl::ClosePartitionExprs(RuntimeState* state) const {
     if (tbl_entry.second->type() != TTableType::HDFS_TABLE) continue;
     HdfsTableDescriptor* hdfs_tbl = static_cast<HdfsTableDescriptor*>(tbl_entry.second);
     for (const auto& part_entry: hdfs_tbl->partition_descriptors()) {
-      Expr::Close(part_entry.second->partition_key_value_ctxs(), state);
+      for (ScalarExprEvaluator* evaluator :
+               part_entry.second->partition_key_value_evaluators()) {
+        evaluator->Close(state);
+      }
     }
   }
 }

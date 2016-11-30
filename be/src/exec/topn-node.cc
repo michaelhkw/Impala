@@ -20,7 +20,7 @@
 #include <sstream>
 
 #include "codegen/llvm-codegen.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "runtime/descriptors.h"
 #include "runtime/mem-pool.h"
 #include "runtime/row-batch.h"
@@ -52,14 +52,17 @@ TopNNode::TopNNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl
 }
 
 Status TopNNode::Init(const TPlanNode& tnode, RuntimeState* state) {
+  const TSortInfo& tsort_info = tnode.sort_node.sort_info;
   RETURN_IF_ERROR(ExecNode::Init(tnode, state));
-  RETURN_IF_ERROR(sort_exec_exprs_.Init(tnode.sort_node.sort_info, pool_));
+  RETURN_IF_ERROR(ScalarExpr::Create(pool_, state, row_descriptor_,
+      tsort_info.ordering_exprs, &ordering_exprs_));
+  DCHECK(tsort_info.__isset.sort_tuple_slot_exprs);
+  RETURN_IF_ERROR(ScalarExpr::Create(pool_, state, child(0)->row_desc(),
+      tsort_info.sort_tuple_slot_exprs, &slot_materialize_exprs_));
   is_asc_order_ = tnode.sort_node.sort_info.is_asc_order;
   nulls_first_ = tnode.sort_node.sort_info.nulls_first;
-
-  DCHECK_EQ(conjunct_ctxs_.size(), 0)
+  DCHECK_EQ(conjuncts_.size(), 0)
       << "TopNNode should never have predicates to evaluate.";
-
   return Status::OK();
 }
 
@@ -68,11 +71,13 @@ Status TopNNode::Prepare(RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Prepare(state));
   tuple_pool_.reset(new MemPool(mem_tracker()));
   materialized_tuple_desc_ = row_descriptor_.tuple_descriptors()[0];
-  RETURN_IF_ERROR(sort_exec_exprs_.Prepare(
-      state, child(0)->row_desc(), row_descriptor_, expr_mem_tracker()));
-  AddExprCtxsToFree(sort_exec_exprs_);
   tuple_row_less_than_.reset(
-      new TupleRowComparator(sort_exec_exprs_, is_asc_order_, nulls_first_));
+      new TupleRowComparator(ordering_exprs_, is_asc_order_, nulls_first_));
+  RETURN_IF_ERROR(ScalarExprEvaluator::Create(pool_, state, expr_mem_pool(),
+      slot_materialize_exprs_, &slot_materialize_expr_evaluators_));
+  AddEvaluatorsToFree(slot_materialize_expr_evaluators_);
+  tuple_row_less_than_.reset(
+      new TupleRowComparator(ordering_exprs_, is_asc_order_, nulls_first_));
   priority_queue_.reset(
       new priority_queue<Tuple*, vector<Tuple*>, ComparatorWrapper<TupleRowComparator>>(
           *tuple_row_less_than_));
@@ -104,12 +109,12 @@ void TopNNode::Codegen(RuntimeState* state) {
     Function* materialize_exprs_no_pool_fn;
 
     codegen_status = Tuple::CodegenMaterializeExprs(codegen, false,
-        *materialized_tuple_desc_, sort_exec_exprs_.sort_tuple_slot_expr_ctxs(),
+        *materialized_tuple_desc_, slot_materialize_exprs_,
         tuple_pool_.get(), &materialize_exprs_tuple_pool_fn);
 
     if (codegen_status.ok()) {
       codegen_status = Tuple::CodegenMaterializeExprs(codegen, false,
-          *materialized_tuple_desc_, sort_exec_exprs_.sort_tuple_slot_expr_ctxs(),
+          *materialized_tuple_desc_, slot_materialize_exprs_,
           NULL, &materialize_exprs_no_pool_fn);
 
       if (codegen_status.ok()) {
@@ -134,9 +139,10 @@ void TopNNode::Codegen(RuntimeState* state) {
 Status TopNNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(ExecNode::Open(state));
+  RETURN_IF_ERROR(ScalarExprEvaluator::Open(slot_materialize_expr_evaluators_, state));
+  RETURN_IF_ERROR(tuple_row_less_than_->Open(pool_, state, expr_mem_pool()));
   RETURN_IF_CANCELLED(state);
   RETURN_IF_ERROR(QueryMaintenance(state));
-  RETURN_IF_ERROR(sort_exec_exprs_.Open(state));
 
   // Allocate memory for a temporary tuple.
   tmp_tuple_ = reinterpret_cast<Tuple*>(
@@ -213,9 +219,17 @@ Status TopNNode::Reset(RuntimeState* state) {
 
 void TopNNode::Close(RuntimeState* state) {
   if (is_closed()) return;
-  if (tuple_pool_.get() != NULL) tuple_pool_->FreeAll();
-  sort_exec_exprs_.Close(state);
+  if (tuple_pool_.get() != nullptr) tuple_pool_->FreeAll();
+  if (tuple_row_less_than_.get() != nullptr) tuple_row_less_than_->Close(state);
+  ScalarExprEvaluator::Close(slot_materialize_expr_evaluators_, state);
+  ScalarExpr::Close(ordering_exprs_);
+  ScalarExpr::Close(slot_materialize_exprs_);
   ExecNode::Close(state);
+}
+
+Status TopNNode::QueryMaintenance(RuntimeState* state) {
+  tuple_row_less_than_->FreeLocalAllocations();
+  return ExecNode::QueryMaintenance(state);
 }
 
 // Reverse the order of the tuples in the priority queue
@@ -236,7 +250,7 @@ void TopNNode::PrepareForOutput() {
 void TopNNode::DebugString(int indentation_level, stringstream* out) const {
   *out << string(indentation_level * 2, ' ');
   *out << "TopNNode("
-      << Expr::DebugString(sort_exec_exprs_.lhs_ordering_expr_ctxs());
+       << ScalarExpr::DebugString(ordering_exprs_);
   for (int i = 0; i < is_asc_order_.size(); ++i) {
     *out << (i > 0 ? " " : "")
          << (is_asc_order_[i] ? "asc" : "desc")

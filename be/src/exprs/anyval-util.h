@@ -274,7 +274,7 @@ class AnyValUtil {
               reinterpret_cast<StringVal*>(dst));
           if (type.type == TYPE_VARCHAR) {
             StringVal* sv = reinterpret_cast<StringVal*>(dst);
-            DCHECK(type.len >= 0);
+            DCHECK_GE(type.len, 0);
             DCHECK_LE(sv->len, type.len);
           }
         } else {

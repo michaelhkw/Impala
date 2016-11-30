@@ -23,6 +23,7 @@
 
 #include "exec/exec-node.h"
 #include "exec/old-hash-table.h"
+#include "exprs/agg-fn.h"
 #include "runtime/descriptors.h"  // for TupleId
 #include "runtime/mem-pool.h"
 #include "runtime/string-value.h"
@@ -64,6 +65,7 @@ class AggregationNode : public ExecNode {
   static const char* LLVM_CLASS_NAME;
 
  protected:
+  virtual Status QueryMaintenance(RuntimeState* state);
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
  private:
@@ -71,24 +73,19 @@ class AggregationNode : public ExecNode {
   OldHashTable::Iterator output_iterator_;
 
   /// The list of all aggregate operations for this exec node.
-  std::vector<AggFnEvaluator*> aggregate_evaluators_;
+  std::vector<AggFn*> agg_fns_;
+  std::vector<AggFnEvaluator*> agg_fn_evaluators_;
 
-  /// FunctionContexts and backing MemPools of 'aggregate_evaluators_'.
+  /// FunctionContexts and backing MemPools of 'agg_fn_evaluators_'.
   /// FunctionContexts objects are stored in ObjectPool of RuntimeState.
-  std::vector<impala_udf::FunctionContext*> agg_fn_ctxs_;
   boost::scoped_ptr<MemPool> agg_fn_pool_;
 
-  /// Cache of the ExprContexts of 'aggregate_evaluators_'. Used in the codegen'ed
-  /// version of UpdateTuple() to avoid loading aggregate_evaluators_[i] at runtime.
-  /// An entry is NULL if the aggregate evaluator is not codegen'ed or there is no
-  /// Expr in the aggregate evaluator (e.g. count(*)).
-  std::vector<ExprContext*> agg_expr_ctxs_;
+  /// Group-by exprs used to evaluate input rows.
+  std::vector<ScalarExpr*> grouping_exprs_;
 
-  /// Exprs used to evaluate input rows
-  std::vector<ExprContext*> probe_expr_ctxs_;
   /// Exprs used to insert constructed aggregation tuple into the hash table.
   /// All the exprs are simply SlotRefs for the intermediate tuple.
-  std::vector<ExprContext*> build_expr_ctxs_;
+  std::vector<ScalarExpr*> build_exprs_;
 
   /// Tuple into which Update()/Merge()/Serialize() results are stored.
   TupleId intermediate_tuple_id_;
@@ -144,13 +141,8 @@ class AggregationNode : public ExecNode {
   /// Returns the tuple holding the final aggregate values.
   Tuple* FinalizeTuple(Tuple* tuple, MemPool* pool);
 
-  /// Accessor for the function context of an AggFnEvaluator. Used only in codegen'ed
-  /// version of the UpdateSlot().
-  FunctionContext* IR_ALWAYS_INLINE GetAggFnCtx(int i) const;
-
-  /// Accessor for the expression context of an AggFnEvaluator. Used only in codegen'ed
-  /// version of the UpdateSlot().
-  ExprContext* IR_ALWAYS_INLINE GetAggExprCtx(int i) const;
+  /// Cross-compiled accessor for &agg_fn_evaluators_[0]. Used by the codegen'ed code.
+  AggFnEvaluator* const* IR_ALWAYS_INLINE agg_fn_evaluators() const;
 
   /// Do the aggregation for all tuple rows in the batch
   void ProcessRowBatchNoGrouping(RowBatch* batch);
@@ -165,8 +157,8 @@ class AggregationNode : public ExecNode {
 
   /// Codegen for updating aggregate_exprs at slot_idx. Returns NULL if unsuccessful.
   /// slot_idx is the idx into aggregate_exprs_ (does not include grouping exprs).
-  llvm::Function* CodegenUpdateSlot(LlvmCodeGen* codegen,
-      AggFnEvaluator* evaluator, SlotDescriptor* slot_desc);
+  llvm::Function* CodegenUpdateSlot(LlvmCodeGen* codegen, int agg_fn_idx,
+      SlotDescriptor* slot_desc);
 
   /// Codegen UpdateTuple(). Returns NULL if codegen is unsuccessful.
   llvm::Function* CodegenUpdateTuple(LlvmCodeGen* codegen);

@@ -202,16 +202,21 @@ class HdfsScanner {
   /// Only relevant when calling the GetNext() interface.
   bool eos_;
 
-  /// Clones of the conjuncts ExprContexts in scan_node_->conjuncts_map(). Each scanner
-  /// has its own ExprContexts so the conjuncts can be safely evaluated in parallel.
-  HdfsScanNodeBase::ConjunctsMap scanner_conjuncts_map_;
+  /// XXX
+  boost::scoped_ptr<MemPool> expr_mem_pool_;
 
-  // Convenience reference to scanner_conjuncts_map_[scan_node_->tuple_idx()] for scanners
-  // that do not support nested types.
-  const std::vector<ExprContext*>* scanner_conjunct_ctxs_;
+  /// Clones of the conjuncts' evaluators in scan_node_->conjuncts_map().
+  /// Each scanner has its own ScalarExprEvaluators so the conjuncts can be safely
+  /// evaluated in parallel.
+  HdfsScanNodeBase::ConjunctEvaluatorsMap conjunct_evaluators_map_;
 
-  // Clones of the conjuncts ExprContexts in scan_node_->dict_filter_conjuncts_map().
-  HdfsScanNodeBase::DictFilterConjunctsMap scanner_dict_filter_map_;
+  // Convenience reference to conjuncts_evaluators_map_[scan_node_->tuple_idx()] for
+  // scanners that do not support nested types.
+  const std::vector<ScalarExprEvaluator*>* conjunct_evaluators_;
+
+  // Clones of the conjuncts' evaluators in scan_node_->dict_filter_conjuncts_map().
+  typedef std::map<SlotId, std::vector<ScalarExprEvaluator*>> DictFilterConjunctsMap;
+  DictFilterConjunctsMap dict_filter_map_;
 
   /// Holds memory for template tuples. The memory in this pool must remain valid as long
   /// as the row batches produced by this scanner. This typically means that the
@@ -355,12 +360,12 @@ class HdfsScanner {
     return Status::OK();
   }
 
-  /// Convenience function for evaluating conjuncts using this scanner's ExprContexts.
+  /// Convenience function for evaluating conjuncts using this scanner's ScalarExprEvaluators.
   /// This must always be inlined so we can correctly replace the call to
   /// ExecNode::EvalConjuncts() during codegen.
   bool IR_ALWAYS_INLINE EvalConjuncts(TupleRow* row)  {
-    return ExecNode::EvalConjuncts(&(*scanner_conjunct_ctxs_)[0],
-                                   scanner_conjunct_ctxs_->size(), row);
+    return ExecNode::EvalConjuncts(&(*conjunct_evaluators_)[0],
+        conjunct_evaluators_->size(), row);
   }
 
   /// Sets 'num_tuples' template tuples in the batch that 'row' points to. Assumes the
@@ -430,7 +435,7 @@ class HdfsScanner {
   /// to WriteCompleteTuple. Stores the resulting function in 'write_complete_tuple_fn'
   /// if codegen was successful or NULL otherwise.
   static Status CodegenWriteCompleteTuple(HdfsScanNodeBase* node, LlvmCodeGen* codegen,
-      const std::vector<ExprContext*>& conjunct_ctxs,
+      const std::vector<ScalarExpr*>& conjuncts,
       llvm::Function** write_complete_tuple_fn);
 
   /// Codegen function to replace WriteAlignedTuples.  WriteAlignedTuples is cross
@@ -475,7 +480,7 @@ class HdfsScanner {
   /// Simple wrapper around scanner_conjunct_ctxs_. Used in the codegen'd version of
   /// WriteCompleteTuple() because it's easier than writing IR to access
   /// scanner_conjunct_ctxs_.
-  ExprContext* GetConjunctCtx(int idx) const;
+  ScalarExprEvaluator* GetConjunctEvaluator(int idx) const;
 
   /// Unit test constructor
   HdfsScanner();

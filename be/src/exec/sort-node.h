@@ -19,7 +19,6 @@
 #define IMPALA_EXEC_SORT_NODE_H
 
 #include "exec/exec-node.h"
-#include "exec/sort-exec-exprs.h"
 #include "runtime/sorter.h"
 #include "runtime/buffered-block-mgr.h"
 
@@ -48,6 +47,7 @@ class SortNode : public ExecNode {
   virtual void Close(RuntimeState* state);
 
  protected:
+  virtual Status QueryMaintenance(RuntimeState* state);
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
  private:
@@ -61,7 +61,13 @@ class SortNode : public ExecNode {
   boost::scoped_ptr<TupleRowComparator> less_than_;
 
   /// Expressions and parameters used for tuple materialization and tuple comparison.
-  SortExecExprs sort_exec_exprs_;
+  std::vector<ScalarExpr*> ordering_exprs_;
+
+  /// Expressions used to materialize slots in the tuples to be sorted.
+  /// One expr per slot in the materialized tuple. Valid only if
+  /// materialize_tuple_ is true.
+  std::vector<ScalarExpr*> slot_materialize_exprs_;
+
   std::vector<bool> is_asc_order_;
   std::vector<bool> nulls_first_;
 

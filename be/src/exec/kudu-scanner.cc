@@ -22,9 +22,9 @@
 #include <vector>
 #include <string>
 
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
 #include "exec/kudu-util.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "runtime/mem-pool.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/runtime-state.h"
@@ -66,7 +66,8 @@ KuduScanner::KuduScanner(KuduScanNodeBase* scan_node, RuntimeState* state)
 }
 
 Status KuduScanner::Open() {
-  return scan_node_->GetConjunctCtxs(&conjunct_ctxs_);
+  return ScalarExprEvaluator::Clone(&obj_pool_, state_, scan_node_->expr_mem_pool(),
+      scan_node_->conjunct_evaluators(), &conjunct_evaluators_);
 }
 
 void KuduScanner::KeepKuduScannerAlive() {
@@ -121,7 +122,7 @@ Status KuduScanner::GetNext(RowBatch* row_batch, bool* eos) {
 
 void KuduScanner::Close() {
   if (scanner_) CloseCurrentClientScanner();
-  Expr::Close(conjunct_ctxs_, state_);
+  ScalarExprEvaluator::Close(conjunct_evaluators_, state_);
 }
 
 Status KuduScanner::OpenNextScanToken(const string& scan_token)  {
@@ -176,7 +177,7 @@ Status KuduScanner::DecodeRowsIntoRowBatch(RowBatch* row_batch, Tuple** tuple_me
 
   // Iterate through the Kudu rows, evaluate conjuncts and deep-copy survivors into
   // 'row_batch'.
-  bool has_conjuncts = !conjunct_ctxs_.empty();
+  bool has_conjuncts = !conjunct_evaluators_.empty();
   int num_rows = cur_kudu_batch_.NumRows();
   for (int krow_idx = cur_kudu_batch_num_read_; krow_idx < num_rows; ++krow_idx) {
     // Evaluate the conjuncts that haven't been pushed down to Kudu. Conjunct evaluation
@@ -185,8 +186,8 @@ Status KuduScanner::DecodeRowsIntoRowBatch(RowBatch* row_batch, Tuple** tuple_me
     KuduScanBatch::RowPtr krow = cur_kudu_batch_.Row(krow_idx);
     Tuple* kudu_tuple = reinterpret_cast<Tuple*>(const_cast<void*>(krow.cell(0)));
     ++cur_kudu_batch_num_read_;
-    if (has_conjuncts && !ExecNode::EvalConjuncts(&conjunct_ctxs_[0],
-        conjunct_ctxs_.size(), reinterpret_cast<TupleRow*>(&kudu_tuple))) {
+    if (has_conjuncts && !ExecNode::EvalConjuncts(&conjunct_evaluators_[0],
+        conjunct_evaluators_.size(), reinterpret_cast<TupleRow*>(&kudu_tuple))) {
       continue;
     }
     // Deep copy the tuple, set it in a new row, and commit the row.
@@ -200,7 +201,7 @@ Status KuduScanner::DecodeRowsIntoRowBatch(RowBatch* row_batch, Tuple** tuple_me
     // Move to the next tuple in the tuple buffer.
     *tuple_mem = next_tuple(*tuple_mem);
   }
-  ExprContext::FreeLocalAllocations(conjunct_ctxs_);
+  ScalarExprEvaluator::FreeLocalAllocations(conjunct_evaluators_);
 
   // Check the status in case an error status was set during conjunct evaluation.
   return state_->GetQueryStatus();

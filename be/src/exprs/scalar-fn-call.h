@@ -21,15 +21,17 @@
 
 #include <string>
 
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "udf/udf.h"
 
 using namespace impala_udf;
 
 namespace impala {
 
+class ScalarExprEvaluator;
 class TExprNode;
 
+///
 /// Expr for evaluating a pre-compiled native or LLVM IR function that uses the UDF
 /// interface (i.e. a scalar function). This class overrides GetCodegendComputeFn() to
 /// return a function that calls any child exprs and passes the results as arguments to the
@@ -41,46 +43,56 @@ class TExprNode;
 /// every possible function signature, codegen may be required to generate the call to the
 /// function even if codegen is disabled. Codegen will also be used for IR UDFs (note that
 /// there is no way to specify both a native and IR library for a single UDF).
-//
+///
+/// Scalar function call: An expr that returns a single scalar value and can be
+/// implemented using the UDF interface. Note that this includes builtins, which although
+/// not being user-defined still use the same interface as UDFs (i.e., they are
+/// implemented as functions with signature "*Val (FunctionContext*, *Val, *Val...)").
+///
 /// TODO:
 /// - Fix error reporting, e.g. reporting leaks
 /// - Testing
 ///    - Test cancellation
 ///    - Type descs in UDA test harness
 ///    - Allow more functions to be NULL in UDA test harness
-class ScalarFnCall : public Expr {
+class ScalarFnCall : public ScalarExpr {
  public:
+  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
   virtual std::string DebugString() const;
 
  protected:
-  friend class Expr;
-  friend class RuntimeState;
+  friend class ScalarExpr;
+  friend class ScalarExprEvaluator;
+  //friend class RuntimeState;
 
-  ScalarFnCall(const TExprNode& node);
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& desc,
-                         ExprContext* context);
-  virtual Status Open(RuntimeState* state, ExprContext* context,
-      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
-  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
-  virtual void Close(RuntimeState* state, ExprContext* context,
-      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
+  ScalarFnCall(const TExprNode& node, int fn_ctx_idx);
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc) override;
+  virtual Status OpenEvaluator(RuntimeState* state, ScalarExprEvaluator* evaluator,
+      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL)
+      const override;
+  virtual void CloseEvaluator(RuntimeState* state, ScalarExprEvaluator* evaluator,
+      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL)
+      const override;
+  virtual int ComputeVarArgsBufferSize() const override;
 
-  virtual BooleanVal GetBooleanVal(ExprContext* context, const TupleRow*);
-  virtual TinyIntVal GetTinyIntVal(ExprContext* context, const TupleRow*);
-  virtual SmallIntVal GetSmallIntVal(ExprContext* context, const TupleRow*);
-  virtual IntVal GetIntVal(ExprContext* context, const TupleRow*);
-  virtual BigIntVal GetBigIntVal(ExprContext* context, const TupleRow*);
-  virtual FloatVal GetFloatVal(ExprContext* context, const TupleRow*);
-  virtual DoubleVal GetDoubleVal(ExprContext* context, const TupleRow*);
-  virtual StringVal GetStringVal(ExprContext* context, const TupleRow*);
-  virtual TimestampVal GetTimestampVal(ExprContext* context, const TupleRow*);
-  virtual DecimalVal GetDecimalVal(ExprContext* context, const TupleRow*);
+  virtual BooleanVal GetBooleanVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual TinyIntVal GetTinyIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual SmallIntVal GetSmallIntVal(
+      ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual IntVal GetIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual BigIntVal GetBigIntVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual FloatVal GetFloatVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual DoubleVal GetDoubleVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual StringVal GetStringVal(ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual TimestampVal GetTimestampVal(
+      ScalarExprEvaluator*, const TupleRow*) const override;
+  virtual DecimalVal GetDecimalVal(ScalarExprEvaluator*, const TupleRow*) const override;
 
  private:
   /// If this function has var args, children()[vararg_start_idx_] is the first vararg
   /// argument.
   /// If this function does not have varargs, it is set to -1.
-  int vararg_start_idx_;
+  const int vararg_start_idx_;
 
   /// Vector of all non-constant children expressions that need to be evaluated for
   /// each input row. The first element of each pair is the child expression and the
@@ -88,7 +100,7 @@ class ScalarFnCall : public Expr {
   std::vector<std::pair<Expr*, impala_udf::AnyVal*>> non_constant_children_;
 
   /// Function pointer to the JIT'd function produced by GetCodegendComputeFn().
-  /// Has signature *Val (ExprContext*, const TupleRow*), and calls the scalar
+  /// Has signature *Val (ScalarExprEvaluator*, const TupleRow*), and calls the scalar
   /// function with signature like *Val (FunctionContext*, const *Val& arg1, ...)
   void* scalar_fn_wrapper_;
 
@@ -110,7 +122,7 @@ class ScalarFnCall : public Expr {
     return vararg_start_idx_ >= 0 ? vararg_start_idx_ : children_.size();
   }
 
-  int NumVarArgs() const { return children_.size() - NumFixedArgs(); }
+  virtual int NumVarArgs() const { return children_.size() - NumFixedArgs(); }
 
   const ColumnType& VarArgsType() const {
     DCHECK_GE(NumVarArgs(), 1);
@@ -128,14 +140,12 @@ class ScalarFnCall : public Expr {
   Status LoadPrepareAndCloseFn(LlvmCodeGen* codegen);
 
   /// Evaluates the non-constant children exprs. Used in the interpreted path.
-  void EvaluateNonConstantChildren(ExprContext* context, const TupleRow* row);
+  void EvaluateNonConstantChildren(
+      ScalarExprEvaluator* evaluator, const TupleRow* row) const;
 
   /// Function to call scalar_fn_. Used in the interpreted path.
   template <typename RETURN_TYPE>
-  RETURN_TYPE InterpretEval(ExprContext* context, const TupleRow* row);
-
-  /// Computes the size of the varargs buffer in bytes (0 bytes if no varargs).
-  int ComputeVarArgsBufferSize() const;
+  RETURN_TYPE InterpretEval(ScalarExprEvaluator* evaluator, const TupleRow* row) const;
 };
 }
 

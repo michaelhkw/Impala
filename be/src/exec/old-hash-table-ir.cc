@@ -29,12 +29,12 @@ uint8_t* OldHashTable::expr_value_null_bits() const {
   return expr_value_null_bits_;
 }
 
-ExprContext* const* OldHashTable::build_expr_ctxs() const {
-  return &build_expr_ctxs_[0];
+ScalarExprEvaluator* const* OldHashTable::build_expr_evaluators() const {
+  return &build_expr_evaluators_[0];
 }
 
-ExprContext* const* OldHashTable::probe_expr_ctxs() const {
-  return &probe_expr_ctxs_[0];
+ScalarExprEvaluator* const* OldHashTable::probe_expr_evaluators() const {
+  return &probe_expr_evaluators_[0];
 }
 
 }

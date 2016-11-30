@@ -29,15 +29,15 @@ IsNotEmptyPredicate::IsNotEmptyPredicate(const TExprNode& node)
   : Predicate(node) {
 }
 
-BooleanVal IsNotEmptyPredicate::GetBooleanVal(ExprContext* ctx, const TupleRow* row) {
-  CollectionVal coll = children_[0]->GetCollectionVal(ctx, row);
+BooleanVal IsNotEmptyPredicate::GetBooleanVal(
+    ScalarExprEvaluator* evaluator, const TupleRow* row) const {
+  CollectionVal coll = children_[0]->GetCollectionVal(evaluator, row);
   if (coll.is_null) return BooleanVal::null();
   return BooleanVal(coll.num_tuples != 0);
 }
 
-Status IsNotEmptyPredicate::Prepare(RuntimeState* state,
-    const RowDescriptor& row_desc, ExprContext* ctx) {
-  RETURN_IF_ERROR(Expr::Prepare(state, row_desc, ctx));
+Status IsNotEmptyPredicate::Init(RuntimeState* state, const RowDescriptor& row_desc) {
+  RETURN_IF_ERROR(ScalarExpr::Init(state, row_desc));
   DCHECK_EQ(children_.size(), 1);
   return Status::OK();
 }
@@ -48,7 +48,7 @@ Status IsNotEmptyPredicate::GetCodegendComputeFn(LlvmCodeGen* codegen,
 }
 
 string IsNotEmptyPredicate::DebugString() const {
-  return Expr::DebugString("IsNotEmptyPredicate");
+  return ScalarExpr::DebugString("IsNotEmptyPredicate");
 }
 
 }

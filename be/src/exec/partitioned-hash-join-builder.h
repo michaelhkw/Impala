@@ -33,9 +33,10 @@
 
 namespace impala {
 
-class ExprContext;
 class RowDescriptor;
 class RuntimeState;
+class ScalarExpr;
+class ScalarExprEvaluator;
 
 /// The build side for the PartitionedHashJoinNode. Build-side rows are hash-partitioned
 /// into PARTITION_FANOUT partitions, with partitions spilled if the full build side
@@ -236,6 +237,13 @@ class PhjBuilder : public DataSink {
     std::unique_ptr<BufferedTupleStream> build_rows_;
   };
 
+ protected:
+  friend class DataSink;
+
+  /// XXX
+  virtual Status Init(RuntimeState* state, const TDataSink& tsink,
+      const std::vector<TExpr>& thrift_output_exprs) override;
+
  private:
   /// Computes the minimum number of buffers required to execute the spilling partitioned
   /// hash algorithm successfully for any input size (assuming enough disk space is
@@ -251,6 +259,9 @@ class PhjBuilder : public DataSink {
     if (join_op_ == TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN) num_reserved_buffers += 3;
     return num_reserved_buffers;
   }
+
+  /// XXX
+  void FreeLocalAllocations() const;
 
   /// Create and initialize a set of hash partitions for partitioning level 'level'.
   /// The previous hash partitions must have been cleared with ClearHashPartitions().
@@ -356,18 +367,15 @@ class PhjBuilder : public DataSink {
   /// If true, the build side has at least one row.
   bool non_empty_build_;
 
-  /// Expr contexts to free after partitioning or inserting each batch.
-  std::vector<ExprContext*> expr_ctxs_to_free_;
-
   /// Expression contexts over input rows for hash table build.
-  std::vector<ExprContext*> build_expr_ctxs_;
+  std::vector<ScalarExpr*> build_exprs_;
 
   /// is_not_distinct_from_[i] is true if and only if the ith equi-join predicate is IS
   /// NOT DISTINCT FROM, rather than equality.
   std::vector<bool> is_not_distinct_from_;
 
   /// List of filters to build.
-  std::vector<FilterContext> filters_;
+  std::vector<FilterContext> filter_ctxs_;
 
   /// Used for hash-related functionality, such as evaluating rows and calculating hashes.
   /// The level is set to the same level as 'hash_partitions_'.
@@ -422,8 +430,8 @@ class PhjBuilder : public DataSink {
 
   /// Partition used for null-aware joins. This partition is always processed at the end
   /// after all build and probe rows are processed. In this partition's 'build_rows_', we
-  /// store all the rows for which 'build_expr_ctxs_' evaluated over the row returns NULL
-  /// (i.e. it has a NULL on the eq join slot).
+  /// store all the rows for which 'build_expr_evaluators_' evaluated over the row returns
+  /// NULL (i.e. it has a NULL on the eq join slot).
   /// NULL if the join is not null aware or we are done processing this partition.
   Partition* null_aware_partition_;
 

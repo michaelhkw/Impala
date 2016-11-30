@@ -19,8 +19,6 @@
 #include <limits>
 #include <gutil/strings/substitute.h>
 
-#include "exprs/expr-context.h"
-#include "exprs/expr.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"

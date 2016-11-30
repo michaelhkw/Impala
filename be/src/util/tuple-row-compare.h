@@ -20,9 +20,8 @@
 #define IMPALA_UTIL_TUPLE_ROW_COMPARE_H_
 
 #include "common/compiler-util.h"
-#include "exec/sort-exec-exprs.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "runtime/descriptors.h"
 #include "runtime/raw-value.h"
 #include "runtime/raw-value.inline.h"
@@ -30,6 +29,9 @@
 #include "runtime/tuple-row.h"
 
 namespace impala {
+
+class RuntimeState;
+class ScalarExprEvaluator;
 
 /// A wrapper around types Comparator with a Less() method. This wrapper allows the use of
 /// type Comparator with STL containers which expect a type like std::less<T>, which uses
@@ -58,33 +60,29 @@ class ComparatorWrapper {
 /// Compares two TupleRows based on a set of exprs, in order.
 class TupleRowComparator {
  public:
-  /// 'sort_key_exprs' must have already been prepared.
+  /// 'ordering_exprs': the ordering expressions for tuple comparison.
   /// 'is_asc' determines, for each expr, if it should be ascending or descending sort
   /// order.
   /// 'nulls_first' determines, for each expr, if nulls should come before or after all
   /// other values.
-  TupleRowComparator(
-      const SortExecExprs& sort_key_exprs,
-      const std::vector<bool>& is_asc,
-      const std::vector<bool>& nulls_first)
-      : key_expr_ctxs_lhs_(sort_key_exprs.lhs_ordering_expr_ctxs()),
-        key_expr_ctxs_rhs_(sort_key_exprs.rhs_ordering_expr_ctxs()),
-        is_asc_(is_asc),
-        codegend_compare_fn_(NULL) {
-    DCHECK_EQ(key_expr_ctxs_lhs_.size(), is_asc.size());
-    DCHECK_EQ(key_expr_ctxs_lhs_.size(), nulls_first.size());
-    nulls_first_.reserve(key_expr_ctxs_lhs_.size());
-    for (int i = 0; i < key_expr_ctxs_lhs_.size(); ++i) {
-      nulls_first_.push_back(nulls_first[i] ? -1 : 1);
+  TupleRowComparator(const std::vector<ScalarExpr*>& ordering_exprs,
+      const std::vector<bool>& is_asc, const std::vector<bool>& nulls_first)
+    : opened_(false),
+      ordering_exprs_(ordering_exprs),
+      is_asc_(is_asc),
+      codegend_compare_fn_(nullptr) {
+    DCHECK_EQ(is_asc_.size(), ordering_exprs.size());
+    for (bool null_first : nulls_first) {
+      nulls_first_.push_back(null_first ? -1 : 1);
     }
   }
 
-  TupleRowComparator(const SortExecExprs& sort_key_exprs, bool is_asc, bool nulls_first)
-      : key_expr_ctxs_lhs_(sort_key_exprs.lhs_ordering_expr_ctxs()),
-        key_expr_ctxs_rhs_(sort_key_exprs.rhs_ordering_expr_ctxs()),
-        is_asc_(key_expr_ctxs_lhs_.size(), is_asc),
-        nulls_first_(key_expr_ctxs_lhs_.size(), nulls_first ? -1 : 1),
-        codegend_compare_fn_(NULL) {}
+  /// Create the evaluators for the ordering expressions the first time it's called.
+  /// Idempotent as Open() may be called multiple times in a subplan.
+  Status Open(ObjectPool* pool, RuntimeState* state, MemPool* mem_pool);
+
+  /// Release resources held by the ordering expressions' evaluators.
+  void Close(RuntimeState* state);
 
   /// Codegens a Compare() function for this comparator that is used in Compare().
   Status Codegen(RuntimeState* state);
@@ -96,7 +94,8 @@ class TupleRowComparator {
   int ALWAYS_INLINE Compare(const TupleRow* lhs, const TupleRow* rhs) const {
     return codegend_compare_fn_ == NULL ?
         CompareInterpreted(lhs, rhs) :
-        (*codegend_compare_fn_)(&key_expr_ctxs_lhs_[0], &key_expr_ctxs_rhs_[0], lhs, rhs);
+        (*codegend_compare_fn_)(&key_expr_evaluators_lhs_[0],
+            &key_expr_evaluators_rhs_[0], lhs, rhs);
   }
 
   /// Returns true if lhs is strictly less than rhs.
@@ -116,8 +115,8 @@ class TupleRowComparator {
 
   /// Free any local allocations made during expression evaluations in Compare().
   void FreeLocalAllocations() const {
-    ExprContext::FreeLocalAllocations(key_expr_ctxs_lhs_);
-    ExprContext::FreeLocalAllocations(key_expr_ctxs_rhs_);
+    ScalarExprEvaluator::FreeLocalAllocations(key_expr_evaluators_lhs_);
+    ScalarExprEvaluator::FreeLocalAllocations(key_expr_evaluators_rhs_);
   }
 
  private:
@@ -129,12 +128,18 @@ class TupleRowComparator {
   /// pointer.
   Status CodegenCompare(LlvmCodeGen* codegen, llvm::Function** fn);
 
-  /// References to ExprContexts managed by SortExecExprs. The lhs ExprContexts must
-  /// be created and prepared before the TupleRowCompator is constructed, but the rhs
-  /// ExprContexts are only created via cloning when SortExecExprs is Open()ed (which
-  /// may be after the TupleRowComparator is constructed).
-  const std::vector<ExprContext*>& key_expr_ctxs_lhs_;
-  const std::vector<ExprContext*>& key_expr_ctxs_rhs_;
+  /// True if Open() has been called already. Avoid allocating expression evaluators
+  /// if they exist already.
+  bool opened_;
+
+  /// References to ordering expressions owned by the Exec node which owns this
+  /// TupleRowComparator.
+  const std::vector<ScalarExpr*>& ordering_exprs_;
+
+  /// The evaluators for the LHS and RHS ordering expressions. The RHS evaluator is created
+  /// via cloning the evaluator after it has been Opened().
+  std::vector<ScalarExprEvaluator*> key_expr_evaluators_lhs_;
+  std::vector<ScalarExprEvaluator*> key_expr_evaluators_rhs_;
 
   std::vector<bool> is_asc_;
   std::vector<int8_t> nulls_first_;
@@ -146,8 +151,8 @@ class TupleRowComparator {
   /// TupleRowComparator is copied before the module is compiled, the copy will still have
   /// its function pointer set to NULL. The function pointer is allocated from the runtime
   /// state's object pool so that its lifetime will be >= that of any copies.
-  typedef int (*CompareFn)(ExprContext* const*, ExprContext* const*, const TupleRow*,
-      const TupleRow*);
+  typedef int (*CompareFn)(ScalarExprEvaluator* const*, ScalarExprEvaluator* const*,
+      const TupleRow*, const TupleRow*);
   CompareFn* codegend_compare_fn_;
 };
 

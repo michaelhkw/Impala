@@ -32,16 +32,15 @@ class TExprNode;
 /// TODO: Implement codegen to eliminate overhead on non-nullable tuples.
 class TupleIsNullPredicate: public Predicate {
  protected:
-  friend class Expr;
+  friend class ScalarExpr;
 
   TupleIsNullPredicate(const TExprNode& node);
 
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc);
   virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
   virtual std::string DebugString() const;
 
-  virtual BooleanVal GetBooleanVal(ExprContext* context, const TupleRow* row);
+  virtual BooleanVal GetBooleanVal(ScalarExprEvaluator*, const TupleRow*) const;
 
  private:
   /// Tuple ids to check for NULL. May contain ids of nullable and non-nullable tuples.

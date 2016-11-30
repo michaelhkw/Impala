@@ -368,11 +368,6 @@ class ImpalaServer::QueryExecState {
   /// Caller needs to hold fetch_rows_lock_ and lock_.
   Status FetchRowsInternal(const int32_t max_rows, QueryResultSet* fetched_rows);
 
-  /// Evaluates 'output_expr_ctxs_' against 'row' and output the evaluated row in
-  /// 'result'. The values' scales (# of digits after decimal) are stored in 'scales'.
-  /// result and scales must have been resized to the number of columns before call.
-  Status GetRowValue(TupleRow* row, std::vector<void*>* result, std::vector<int>* scales);
-
   /// Gather and publish all required updates to the metastore
   Status UpdateCatalog();
 

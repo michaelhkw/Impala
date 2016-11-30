@@ -27,7 +27,7 @@
 #include "exec/kudu-table-sink.h"
 #include "exec/kudu-util.h"
 #include "exec/plan-root-sink.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "gen-cpp/ImpalaInternalService_constants.h"
 #include "gen-cpp/ImpalaInternalService_types.h"
 #include "gutil/strings/substitute.h"
@@ -48,68 +48,61 @@ DataSink::~DataSink() {
   DCHECK(closed_);
 }
 
-Status DataSink::CreateDataSink(ObjectPool* pool,
-    const TDataSink& thrift_sink, const vector<TExpr>& output_exprs,
+Status DataSink::CreateDataSink(RuntimeState* state,
+    const TDataSink& thrift_sink, const vector<TExpr>& thrift_output_exprs,
     const TPlanFragmentInstanceCtx& fragment_instance_ctx,
     const RowDescriptor& row_desc, scoped_ptr<DataSink>* sink) {
-  DataSink* tmp_sink = NULL;
   switch (thrift_sink.type) {
     case TDataSinkType::DATA_STREAM_SINK:
-      if (!thrift_sink.__isset.stream_sink) {
-        return Status("Missing data stream sink.");
-      }
+      if (!thrift_sink.__isset.stream_sink) return Status("Missing data stream sink.");
 
       // TODO: figure out good buffer size based on size of output row
-      tmp_sink = new DataStreamSender(pool,
-          fragment_instance_ctx.sender_id, row_desc, thrift_sink.stream_sink,
-          fragment_instance_ctx.destinations, 16 * 1024);
-      sink->reset(tmp_sink);
+      sink->reset(new DataStreamSender(fragment_instance_ctx.sender_id, row_desc,
+          thrift_sink, fragment_instance_ctx.destinations, 16 * 1024));
       break;
-
     case TDataSinkType::TABLE_SINK:
       if (!thrift_sink.__isset.table_sink) return Status("Missing table sink.");
       switch (thrift_sink.table_sink.type) {
         case TTableSinkType::HDFS:
-          tmp_sink = new HdfsTableSink(row_desc, output_exprs, thrift_sink);
-          sink->reset(tmp_sink);
+          sink->reset(new HdfsTableSink(row_desc, thrift_sink));
           break;
         case TTableSinkType::HBASE:
-          tmp_sink = new HBaseTableSink(row_desc, output_exprs, thrift_sink);
-          sink->reset(tmp_sink);
+          sink->reset(new HBaseTableSink(row_desc, thrift_sink));
           break;
         case TTableSinkType::KUDU:
           RETURN_IF_ERROR(CheckKuduAvailability());
-          tmp_sink = new KuduTableSink(row_desc, output_exprs, thrift_sink);
-          sink->reset(tmp_sink);
+          sink->reset(new KuduTableSink(row_desc, thrift_sink));
           break;
         default:
           stringstream error_msg;
-          const char* str = "Unknown table sink";
           map<int, const char*>::const_iterator i =
               _TTableSinkType_VALUES_TO_NAMES.find(thrift_sink.table_sink.type);
-          if (i != _TTableSinkType_VALUES_TO_NAMES.end()) {
-            str = i->second;
-          }
+          const char* str = i != _TTableSinkType_VALUES_TO_NAMES.end() ?
+              i->second : "Unknown table sink";
           error_msg << str << " not implemented.";
           return Status(error_msg.str());
       }
-
       break;
     case TDataSinkType::PLAN_ROOT_SINK:
-      sink->reset(new PlanRootSink(row_desc, output_exprs, thrift_sink));
+      sink->reset(new PlanRootSink(row_desc));
       break;
     default:
       stringstream error_msg;
       map<int, const char*>::const_iterator i =
           _TDataSinkType_VALUES_TO_NAMES.find(thrift_sink.type);
-      const char* str = "Unknown data sink type ";
-      if (i != _TDataSinkType_VALUES_TO_NAMES.end()) {
-        str = i->second;
-      }
+      const char* str = i != _TDataSinkType_VALUES_TO_NAMES.end() ?
+          i->second :  "Unknown data sink type ";
       error_msg << str << " not implemented.";
       return Status(error_msg.str());
   }
+  RETURN_IF_ERROR((*sink)->Init(state, thrift_sink, thrift_output_exprs));
   return Status::OK();
+}
+
+Status DataSink::Init(RuntimeState* state, const TDataSink& tsink,
+    const vector<TExpr>& thrift_output_exprs) {
+  return ScalarExpr::Create(state->obj_pool(), state, row_desc_,
+      thrift_output_exprs, &output_exprs_);
 }
 
 void DataSink::MergeDmlStats(const TInsertStats& src_stats,
@@ -120,7 +113,6 @@ void DataSink::MergeDmlStats(const TInsertStats& src_stats,
     if (!dst_stats->kudu_stats.__isset.num_row_errors) {
       dst_stats->kudu_stats.__set_num_row_errors(0);
     }
-
     dst_stats->kudu_stats.__set_num_row_errors(
         dst_stats->kudu_stats.num_row_errors + src_stats.kudu_stats.num_row_errors);
   }
@@ -183,11 +175,24 @@ Status DataSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
   mem_tracker_.reset(new MemTracker(profile_, -1, name, parent_mem_tracker));
   expr_mem_tracker_.reset(
       new MemTracker(-1, Substitute("$0 Exprs", name), mem_tracker_.get(), false));
+  expr_mem_pool_.reset(new MemPool(expr_mem_tracker_.get()));
+
+  // TODO: codegen table sink
+  RETURN_IF_ERROR(ScalarExprEvaluator::Create(state->obj_pool(), state,
+      expr_mem_pool(), output_exprs_, &output_expr_evaluators_));
   return Status::OK();
+}
+
+Status DataSink::Open(RuntimeState* state) {
+  DCHECK_EQ(output_exprs_.size(), output_expr_evaluators_.size());
+  return ScalarExprEvaluator::Open(output_expr_evaluators_, state);
 }
 
 void DataSink::Close(RuntimeState* state) {
   if (closed_) return;
+  ScalarExprEvaluator::Close(output_expr_evaluators_, state);
+  ScalarExpr::Close(output_exprs_);
+  if (expr_mem_pool() != nullptr) expr_mem_pool_->FreeAll();
   if (expr_mem_tracker_ != NULL) {
     expr_mem_tracker_->UnregisterFromParent();
     expr_mem_tracker_.reset();

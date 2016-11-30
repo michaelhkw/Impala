@@ -363,7 +363,7 @@ void HdfsScanNode::ScannerThread() {
   Status filter_status = Status::OK();
   for (auto& filter_ctx: filter_ctxs_) {
     FilterContext filter;
-    filter_status = filter.CloneFrom(filter_ctx, runtime_state_);
+    filter_status = filter.CloneFrom(pool_, runtime_state_, expr_mem_pool(), filter_ctx);
     if (!filter_status.ok()) break;
     filter_ctxs.push_back(filter);
   }
@@ -385,8 +385,8 @@ void HdfsScanNode::ScannerThread() {
           runtime_state_->resource_pool()->ReleaseThreadToken(false);
           if (filter_status.ok()) {
             for (auto& ctx: filter_ctxs) {
-              ctx.expr_ctx->FreeLocalAllocations();
-              ctx.expr_ctx->Close(runtime_state_);
+              ctx.expr_evaluator->FreeLocalAllocations();
+              ctx.expr_evaluator->Close(runtime_state_);
             }
           }
           return;
@@ -457,8 +457,8 @@ void HdfsScanNode::ScannerThread() {
 
   if (filter_status.ok()) {
     for (auto& ctx: filter_ctxs) {
-      ctx.expr_ctx->FreeLocalAllocations();
-      ctx.expr_ctx->Close(runtime_state_);
+      ctx.expr_evaluator->FreeLocalAllocations();
+      ctx.expr_evaluator->Close(runtime_state_);
     }
   }
 
