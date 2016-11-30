@@ -88,117 +88,128 @@ bool ParseString(const string& str, T* val) {
   return !stream.fail();
 }
 
-FunctionContext* Expr::RegisterFunctionContext(ExprContext* ctx, RuntimeState* state,
-                                               int varargs_buffer_size) {
-  FunctionContext::TypeDesc return_type = AnyValUtil::ColumnTypeToTypeDesc(type_);
-  vector<FunctionContext::TypeDesc> arg_types;
-  for (int i = 0; i < children_.size(); ++i) {
-    arg_types.push_back(AnyValUtil::ColumnTypeToTypeDesc(children_[i]->type_));
-  }
-  fn_context_index_ = ctx->Register(state, return_type, arg_types, varargs_buffer_size);
-  return ctx->fn_context(fn_context_index_);
-}
-
-Expr::Expr(const ColumnType& type, bool is_slotref)
+Expr::Expr(const ColumnType& type, bool is_slotref, int fn_context_index)
     : cache_entry_(NULL),
       is_slotref_(is_slotref),
+      fn_context_index_(fn_context_index),
+      fn_context_index_start_(-1),
+      fn_context_index_end_(-1),
       type_(type),
-      output_scale_(-1),
-      fn_context_index_(-1),
       ir_compute_fn_(NULL) {
 }
 
-Expr::Expr(const TExprNode& node, bool is_slotref)
+Expr::Expr(const TExprNode& node, bool is_slotref, int fn_context_index)
     : cache_entry_(NULL),
       is_slotref_(is_slotref),
+      fn_context_index_(fn_context_index),
+      fn_context_index_start_(-1),
+      fn_context_index_end_(-1),
       type_(ColumnType::FromThrift(node.type)),
-      output_scale_(-1),
-      fn_context_index_(-1),
       ir_compute_fn_(NULL) {
   if (node.__isset.fn) fn_ = node.fn;
 }
 
 Expr::~Expr() {
-  DCHECK(cache_entry_ == NULL);
+  if (cache_entry_ != NULL) {
+    LibCache::instance()->DecrementUseCount(cache_entry_);
+    cache_entry_ = NULL;
+  }
 }
 
-void Expr::Close(RuntimeState* state, ExprContext* context,
-                 FunctionContext::FunctionStateScope scope) {
-  for (int i = 0; i < children_.size(); ++i) {
-    children_[i]->Close(state, context, scope);
-  }
+void Expr::CloseContext(RuntimeState* state, ExprContext* context,
+    FunctionContext::FunctionStateScope scope) {
+  for (Expr* child : children_) child->CloseContext(state, context, scope);
+}
 
-  if (scope == FunctionContext::FRAGMENT_LOCAL) {
-    // This is the final, non-cloned context to close. Clean up the whole Expr.
-    if (cache_entry_ != NULL) {
-      LibCache::instance()->DecrementUseCount(cache_entry_);
-      cache_entry_ = NULL;
+Status Expr::CreateExprTree(ObjectPool* pool, const TExpr& texpr, Expr** root,
+    int* node_idx, bool use_all_nodes) {
+  int fn_context_index = 0;
+  Status status =
+      CreateTreeFromThrift(pool, texpr.nodes, NULL, node_idx, root, &fn_context_index);
+  if (status.ok()) {
+    if (use_all_nodes && *node_idx + 1 != texpr.nodes.size()) {
+      return Status("Expression tree only partially reconstructed. Not all thrift " \
+          "nodes were used.");
     }
-  }
-}
-
-Status Expr::CreateExprTree(ObjectPool* pool, const TExpr& texpr, ExprContext** ctx) {
-  // input is empty
-  if (texpr.nodes.size() == 0) {
-    *ctx = NULL;
-    return Status::OK();
-  }
-  int node_idx = 0;
-  Expr* e;
-  Status status = CreateTreeFromThrift(pool, texpr.nodes, NULL, &node_idx, &e, ctx);
-  if (status.ok() && node_idx + 1 != texpr.nodes.size()) {
-    status = Status(
-        "Expression tree only partially reconstructed. Not all thrift nodes were used.");
-  }
-  if (!status.ok()) {
+  } else {
     LOG(ERROR) << "Could not construct expr tree.\n" << status.GetDetail() << "\n"
                << apache::thrift::ThriftDebugString(texpr);
   }
   return status;
 }
 
+Status Expr::CreateExprTree(ObjectPool* pool, const TExpr& texpr, Expr** expr) {
+  // input is empty
+  if (texpr.nodes.size() == 0) {
+    *expr = NULL;
+    return Status::OK();
+  }
+  int node_idx = 0;
+  return CreateExprTree(pool, texpr, expr, &node_idx, true);
+}
+
 Status Expr::CreateExprTrees(ObjectPool* pool, const vector<TExpr>& texprs,
-                             vector<ExprContext*>* ctxs) {
-  ctxs->clear();
-  for (int i = 0; i < texprs.size(); ++i) {
-    ExprContext* ctx;
-    RETURN_IF_ERROR(CreateExprTree(pool, texprs[i], &ctx));
-    ctxs->push_back(ctx);
+    vector<Expr*>* exprs) {
+  exprs->clear();
+  for (const TExpr& texpr: texprs) {
+    Expr* expr;
+    RETURN_IF_ERROR(CreateExprTree(pool, texpr, &expr));
+    exprs->push_back(expr);
+  }
+  return Status::OK();
+}
+
+Status Expr::CreateInputExprTrees(ObjectPool* pool, const TExpr& texpr,
+    vector<Expr*>* exprs) {
+  DCHECK(texpr.nodes[0].node_type == TExprNodeType::AGGREGATE_EXPR ||
+      texpr.nodes[0].node_type == TExprNodeType::FUNCTION_CALL);
+  int node_idx = 1;
+  int num_inputs = texpr.nodes[0].num_children;
+  for (int i = 0; i < num_inputs; ++i) {
+    DCHECK_LT(node_idx, texpr.nodes.size());
+    Expr* expr;
+    RETURN_IF_ERROR(CreateExprTree(pool, texpr, &expr, &node_idx, i == num_inputs - 1));
+    exprs->push_back(expr);
+    ++node_idx;
   }
   return Status::OK();
 }
 
 Status Expr::CreateTreeFromThrift(ObjectPool* pool, const vector<TExprNode>& nodes,
-    Expr* parent, int* node_idx, Expr** root_expr, ExprContext** ctx) {
+    Expr* parent, int* node_idx, Expr** root_expr, int* fn_context_index) {
   // propagate error case
   if (*node_idx >= nodes.size()) {
     return Status("Failed to reconstruct expression tree from thrift.");
   }
   int num_children = nodes[*node_idx].num_children;
   Expr* expr = NULL;
-  RETURN_IF_ERROR(CreateExpr(pool, nodes[*node_idx], &expr));
+  // Save 'fn_context_index' before creating the expression.
+  int fn_context_index_start = *fn_context_index;
+  RETURN_IF_ERROR(CreateExpr(pool, nodes[*node_idx], &expr, fn_context_index));
   DCHECK(expr != NULL);
   if (parent != NULL) {
     parent->AddChild(expr);
   } else {
     DCHECK(root_expr != NULL);
-    DCHECK(ctx != NULL);
     *root_expr = expr;
-    *ctx = pool->Add(new ExprContext(expr));
   }
   for (int i = 0; i < num_children; i++) {
     *node_idx += 1;
-    RETURN_IF_ERROR(CreateTreeFromThrift(pool, nodes, expr, node_idx, NULL, NULL));
+    RETURN_IF_ERROR(
+        CreateTreeFromThrift(pool, nodes, expr, node_idx, NULL, fn_context_index));
     // we are expecting a child, but have used all nodes
     // this means we have been given a bad tree and must fail
     if (*node_idx >= nodes.size()) {
       return Status("Failed to reconstruct expression tree from thrift.");
     }
   }
+  expr->fn_context_index_start_ = fn_context_index_start;
+  expr->fn_context_index_end_ = *fn_context_index;
   return Status::OK();
 }
 
-Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** expr) {
+Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** expr,
+    int* fn_context_index) {
   switch (texpr_node.node_type) {
     case TExprNodeType::BOOL_LITERAL:
     case TExprNodeType::FLOAT_LITERAL:
@@ -212,7 +223,8 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
       if (!texpr_node.__isset.case_expr) {
         return Status("Case expression not set in thrift node");
       }
-      *expr = pool->Add(new CaseExpr(texpr_node));
+      *expr = pool->Add(new CaseExpr(texpr_node, *fn_context_index));
+      ++(*fn_context_index);
       return Status::OK();
     case TExprNodeType::COMPOUND_PRED:
       if (texpr_node.fn.name.function_name == "and") {
@@ -221,7 +233,8 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
         *expr = pool->Add(new OrPredicate(texpr_node));
       } else {
         DCHECK_EQ(texpr_node.fn.name.function_name, "not");
-        *expr = pool->Add(new ScalarFnCall(texpr_node));
+        *expr = pool->Add(new ScalarFnCall(texpr_node, *fn_context_index));
+        ++(*fn_context_index);
       }
       return Status::OK();
     case TExprNodeType::NULL_LITERAL:
@@ -252,11 +265,12 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
         *expr = pool->Add(new IsNullExpr(texpr_node));
       } else if (texpr_node.fn.name.function_name == "coalesce") {
         *expr = pool->Add(new CoalesceExpr(texpr_node));
-
       } else if (texpr_node.fn.binary_type == TFunctionBinaryType::JAVA) {
-        *expr = pool->Add(new HiveUdfCall(texpr_node));
+        *expr = pool->Add(new HiveUdfCall(texpr_node, *fn_context_index));
+        ++(*fn_context_index);
       } else {
-        *expr = pool->Add(new ScalarFnCall(texpr_node));
+        *expr = pool->Add(new ScalarFnCall(texpr_node, *fn_context_index));
+        ++(*fn_context_index);
       }
       return Status::OK();
     case TExprNodeType::IS_NOT_EMPTY_PRED:
@@ -267,16 +281,6 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
       os << "Unknown expr node type: " << texpr_node.node_type;
       return Status(os.str());
   }
-}
-
-bool Expr::NeedCodegen(const TExpr& texpr) {
-  for (const TExprNode& texpr_node : texpr.nodes) {
-    if (texpr_node.node_type == TExprNodeType::FUNCTION_CALL && texpr_node.__isset.fn &&
-        texpr_node.fn.binary_type == TFunctionBinaryType::IR) {
-      return true;
-    }
-  }
-  return false;
 }
 
 struct MemLayoutData {
@@ -343,7 +347,6 @@ int Expr::ComputeResultsLayout(const vector<Expr*>& exprs, vector<int>* offsets,
   *var_result_begin = -1;
 
   for (int i = 0; i < data.size(); ++i) {
-
     // Increase byte_offset so data[i] is at the right alignment (i.e. add padding between
     // this value and the previous).
     byte_offset = BitUtil::RoundUp(byte_offset, data[i].alignment);
@@ -366,56 +369,18 @@ int Expr::ComputeResultsLayout(const vector<ExprContext*>& ctxs, vector<int>* of
   return ComputeResultsLayout(exprs, offsets, var_result_begin);
 }
 
-void Expr::Close(const vector<ExprContext*>& ctxs, RuntimeState* state) {
-  for (int i = 0; i < ctxs.size(); ++i) {
-    ctxs[i]->Close(state);
-  }
-}
-
-Status Expr::Prepare(const vector<ExprContext*>& ctxs, RuntimeState* state,
-                     const RowDescriptor& row_desc, MemTracker* tracker) {
-  for (int i = 0; i < ctxs.size(); ++i) {
-    RETURN_IF_ERROR(ctxs[i]->Prepare(state, row_desc, tracker));
-  }
-  return Status::OK();
-}
-
-Status Expr::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                     ExprContext* context) {
+Status Expr::Init(RuntimeState* state, const RowDescriptor& row_desc) {
   DCHECK(type_.type != INVALID_TYPE);
   for (int i = 0; i < children_.size(); ++i) {
-    RETURN_IF_ERROR(children_[i]->Prepare(state, row_desc, context));
+    RETURN_IF_ERROR(children_[i]->Init(state, row_desc));
   }
   return Status::OK();
 }
 
-Status Expr::Open(const vector<ExprContext*>& ctxs, RuntimeState* state) {
-  for (int i = 0; i < ctxs.size(); ++i) {
-    RETURN_IF_ERROR(ctxs[i]->Open(state));
-  }
-  return Status::OK();
-}
-
-Status Expr::Open(RuntimeState* state, ExprContext* context,
-                  FunctionContext::FunctionStateScope scope) {
+Status Expr::OpenContext(RuntimeState* state, ExprContext* context,
+    FunctionContext::FunctionStateScope scope) {
   for (int i = 0; i < children_.size(); ++i) {
-    RETURN_IF_ERROR(children_[i]->Open(state, context, scope));
-  }
-  return Status::OK();
-}
-
-Status Expr::CloneIfNotExists(const vector<ExprContext*>& ctxs, RuntimeState* state,
-    vector<ExprContext*>* new_ctxs) {
-  DCHECK(new_ctxs != NULL);
-  if (!new_ctxs->empty()) {
-    // 'ctxs' was already cloned into '*new_ctxs', nothing to do.
-    DCHECK_EQ(new_ctxs->size(), ctxs.size());
-    for (int i = 0; i < new_ctxs->size(); ++i) DCHECK((*new_ctxs)[i]->is_clone_);
-    return Status::OK();
-  }
-  new_ctxs->resize(ctxs.size());
-  for (int i = 0; i < ctxs.size(); ++i) {
-    RETURN_IF_ERROR(ctxs[i]->Clone(state, &(*new_ctxs)[i]));
+    RETURN_IF_ERROR(children_[i]->OpenContext(state, context, scope));
   }
   return Status::OK();
 }
@@ -438,12 +403,6 @@ string Expr::DebugString(const vector<Expr*>& exprs) {
   }
   out << "]";
   return out.str();
-}
-
-string Expr::DebugString(const vector<ExprContext*>& ctxs) {
-  vector<Expr*> exprs;
-  for (int i = 0; i < ctxs.size(); ++i) exprs.push_back(ctxs[i]->root());
-  return DebugString(exprs);
 }
 
 bool Expr::IsConstant() const {
@@ -590,7 +549,7 @@ Status Expr::GetConstVal(RuntimeState* state, ExprContext* context, AnyVal** con
       DCHECK(false) << "Type not implemented: " << type();
   }
   // Errors may have been set during the GetConstVal() call.
-  return GetFnContextError(context);
+  return context->GetFnContextError(fn_context_index_start_, fn_context_index_end_);
 }
 
 int Expr::GetConstantInt(const FunctionContext::TypeDesc& return_type,
@@ -745,14 +704,6 @@ TimestampVal Expr::GetTimestampVal(ExprContext* context, const TupleRow* row) {
 DecimalVal Expr::GetDecimalVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return DecimalVal::null();
-}
-
-Status Expr::GetFnContextError(ExprContext* ctx) {
-  if (fn_context_index_ != -1) {
-    FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
-    if (fn_ctx->has_error()) return Status(fn_ctx->error_msg());
-  }
-  return Status::OK();
 }
 
 string Expr::DebugString(const string& expr_name) const {

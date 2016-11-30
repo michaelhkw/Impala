@@ -76,15 +76,9 @@ Status AggFnEvaluator::Create(ObjectPool* pool, const TExpr& desc,
     bool is_analytic_fn, AggFnEvaluator** result) {
   DCHECK_GT(desc.nodes.size(), 0);
   *result = pool->Add(new AggFnEvaluator(desc.nodes[0], is_analytic_fn));
-  int node_idx = 0;
-  for (int i = 0; i < desc.nodes[0].num_children; ++i) {
-    ++node_idx;
-    Expr* expr = NULL;
-    ExprContext* ctx = NULL;
-    RETURN_IF_ERROR(Expr::CreateTreeFromThrift(
-        pool, desc.nodes, NULL, &node_idx, &expr, &ctx));
-    (*result)->input_expr_ctxs_.push_back(ctx);
-  }
+  vector<Expr*> input_exprs;
+  RETURN_IF_ERROR(Expr::CreateInputExprTrees(pool, desc, &input_exprs));
+  ExprContext::Create(pool, input_exprs, &((*result)->input_expr_ctxs_));
   return Status::OK();
 }
 
@@ -128,9 +122,8 @@ AggFnEvaluator::~AggFnEvaluator() {
 }
 
 Status AggFnEvaluator::Prepare(RuntimeState* state, const RowDescriptor& desc,
-      const SlotDescriptor* intermediate_slot_desc,
-      const SlotDescriptor* output_slot_desc,
-      MemPool* agg_fn_pool, FunctionContext** agg_fn_ctx) {
+    const SlotDescriptor* intermediate_slot_desc, const SlotDescriptor* output_slot_desc,
+    MemPool* agg_fn_pool, FunctionContext** agg_fn_ctx) {
   DCHECK(intermediate_slot_desc != NULL);
   DCHECK_EQ(intermediate_slot_desc->type().type,
       ColumnType::FromThrift(fn_.aggregate_fn.intermediate_type).type);
@@ -143,7 +136,7 @@ Status AggFnEvaluator::Prepare(RuntimeState* state, const RowDescriptor& desc,
   output_slot_desc_ = output_slot_desc;
 
   RETURN_IF_ERROR(
-      Expr::Prepare(input_expr_ctxs_, state, desc, agg_fn_pool->mem_tracker()));
+      ExprContext::Prepare(input_expr_ctxs_, state, desc, agg_fn_pool->mem_tracker()));
 
   for (int i = 0; i < input_expr_ctxs_.size(); ++i) {
     AnyVal* staging_input_val;
@@ -224,7 +217,7 @@ Status AggFnEvaluator::Prepare(RuntimeState* state, const RowDescriptor& desc,
 }
 
 Status AggFnEvaluator::Open(RuntimeState* state, FunctionContext* agg_fn_ctx) {
-  RETURN_IF_ERROR(Expr::Open(input_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(input_expr_ctxs_, state));
   // Now that we have opened all our input exprs, it is safe to evaluate any constant
   // values for the UDA's FunctionContext (we cannot evaluate exprs before calling Open()
   // on them).
@@ -240,7 +233,7 @@ Status AggFnEvaluator::Open(RuntimeState* state, FunctionContext* agg_fn_ctx) {
 }
 
 void AggFnEvaluator::Close(RuntimeState* state) {
-  Expr::Close(input_expr_ctxs_, state);
+  ExprContext::Close(input_expr_ctxs_, state);
 
   if (cache_entry_ != NULL) {
     LibCache::instance()->DecrementUseCount(cache_entry_);

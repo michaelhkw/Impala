@@ -244,8 +244,9 @@ TEST_F(ExprCodegenTest, TestInlineConstants) {
   // Create Expr
   ObjectPool pool;
   MemTracker tracker;
-  ExprContext* ctx;
-  ASSERT_OK(Expr::CreateExprTree(&pool, texpr, &ctx));
+  Expr* expr;
+  ASSERT_OK(Expr::CreateExprTree(&pool, texpr, &expr));
+  ExprContext* ctx = ExprContext::Create(&pool, expr);
 
   // Get TestGetConstant() IR function
   stringstream test_udf_file;

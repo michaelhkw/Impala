@@ -74,16 +74,18 @@ Status HashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   const vector<TEqJoinCondition>& eq_join_conjuncts =
       tnode.hash_join_node.eq_join_conjuncts;
   for (int i = 0; i < eq_join_conjuncts.size(); ++i) {
-    ExprContext* ctx;
-    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjuncts[i].left, &ctx));
-    probe_expr_ctxs_.push_back(ctx);
-    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjuncts[i].right, &ctx));
-    build_expr_ctxs_.push_back(ctx);
+    Expr* probe_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjuncts[i].left, &probe_expr));
+    probe_expr_ctxs_.push_back(ExprContext::Create(pool_, probe_expr));
+    Expr* build_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjuncts[i].right, &build_expr));
+    build_expr_ctxs_.push_back(ExprContext::Create(pool_, build_expr));
     is_not_distinct_from_.push_back(eq_join_conjuncts[i].is_not_distinct_from);
   }
-  RETURN_IF_ERROR(
-      Expr::CreateExprTrees(pool_, tnode.hash_join_node.other_join_conjuncts,
-                            &other_join_conjunct_ctxs_));
+  vector<Expr*> other_join_conjuncts;
+  RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, tnode.hash_join_node.other_join_conjuncts,
+      &other_join_conjuncts));
+  ExprContext::Create(pool_, other_join_conjuncts, &other_join_conjunct_ctxs_);
 
   for (const TRuntimeFilterDesc& tfilter: tnode.runtime_filters) {
     // If filter propagation not enabled, only consider building broadcast joins (that may
@@ -97,9 +99,9 @@ Status HashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
       continue;
     }
     filters_.push_back(state->filter_bank()->RegisterFilter(tfilter, true));
-    ExprContext* ctx;
-    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, tfilter.src_expr, &ctx));
-    filter_expr_ctxs_.push_back(ctx);
+    Expr* src_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, tfilter.src_expr, &src_expr));
+    filter_expr_ctxs_.push_back(ExprContext::Create(pool_, src_expr));
   }
   return Status::OK();
 }
@@ -115,21 +117,21 @@ Status HashJoinNode::Prepare(RuntimeState* state) {
 
   // build and probe exprs are evaluated in the context of the rows produced by our
   // right and left children, respectively
-  RETURN_IF_ERROR(
-      Expr::Prepare(build_expr_ctxs_, state, child(1)->row_desc(), expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(build_expr_ctxs_, state, child(1)->row_desc(),
+      expr_mem_tracker()));
   AddExprCtxsToFree(build_expr_ctxs_);
-  RETURN_IF_ERROR(
-      Expr::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(), expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(),
+      expr_mem_tracker()));
   AddExprCtxsToFree(probe_expr_ctxs_);
-  RETURN_IF_ERROR(
-      Expr::Prepare(filter_expr_ctxs_, state, child(1)->row_desc(), expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(filter_expr_ctxs_, state, child(1)->row_desc(),
+      expr_mem_tracker()));
   AddExprCtxsToFree(filter_expr_ctxs_);
 
   // other_join_conjunct_ctxs_ are evaluated in the context of rows assembled from all
   // build and probe tuples; full_row_desc is not necessarily the same as the output row
   // desc, e.g., because semi joins only return the build xor probe tuples
   RowDescriptor full_row_desc(child(0)->row_desc(), child(1)->row_desc());
-  RETURN_IF_ERROR(Expr::Prepare(
+  RETURN_IF_ERROR(ExprContext::Prepare(
       other_join_conjunct_ctxs_, state, full_row_desc, expr_mem_tracker()));
   AddExprCtxsToFree(other_join_conjunct_ctxs_);
 
@@ -191,20 +193,20 @@ void HashJoinNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   if (hash_tbl_.get() != NULL) hash_tbl_->Close();
   if (build_pool_.get() != NULL) build_pool_->FreeAll();
-  Expr::Close(build_expr_ctxs_, state);
-  Expr::Close(probe_expr_ctxs_, state);
-  Expr::Close(filter_expr_ctxs_, state);
-  Expr::Close(other_join_conjunct_ctxs_, state);
+  ExprContext::Close(build_expr_ctxs_, state);
+  ExprContext::Close(probe_expr_ctxs_, state);
+  ExprContext::Close(filter_expr_ctxs_, state);
+  ExprContext::Close(other_join_conjunct_ctxs_, state);
   BlockingJoinNode::Close(state);
 }
 
 Status HashJoinNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(BlockingJoinNode::Open(state));
-  RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(probe_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(filter_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(other_join_conjunct_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(build_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(probe_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(filter_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(other_join_conjunct_ctxs_, state));
 
   // Check for errors and free local allocations before opening children.
   RETURN_IF_CANCELLED(state);
@@ -492,8 +494,8 @@ void HashJoinNode::AddToDebugString(int indentation_level, stringstream* out) co
   *out << " hash_tbl=";
   *out << string(indentation_level * 2, ' ');
   *out << "HashTbl("
-       << " build_exprs=" << Expr::DebugString(build_expr_ctxs_)
-       << " probe_exprs=" << Expr::DebugString(probe_expr_ctxs_);
+       << " build_exprs=" << ExprContext::DebugString(build_expr_ctxs_)
+       << " probe_exprs=" << ExprContext::DebugString(probe_expr_ctxs_);
   *out << ")";
 }
 

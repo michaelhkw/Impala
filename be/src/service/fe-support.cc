@@ -110,11 +110,12 @@ Java_org_apache_impala_service_FeSupport_NativeEvalExprsWithoutRow(
   // Prepare() the exprs. Always Close() the exprs even in case of errors.
   vector<ExprContext*> expr_ctxs;
   for (const TExpr& texpr : texprs) {
-    ExprContext* ctx;
-    status = Expr::CreateExprTree(&obj_pool, texpr, &ctx);
+    Expr* expr;
+    status = Expr::CreateExprTree(&obj_pool, texpr, &expr);
     if (!status.ok()) goto error;
 
     // Add 'ctx' to vector so it will be closed if Prepare() fails.
+    ExprContext* ctx = ExprContext::Create(&obj_pool, expr);
     expr_ctxs.push_back(ctx);
     status = ctx->Prepare(&state, RowDescriptor(), state.query_mem_tracker());
     if (!status.ok()) goto error;
@@ -140,9 +141,8 @@ Java_org_apache_impala_service_FeSupport_NativeEvalExprsWithoutRow(
 
     TColumnValue val;
     expr_ctx->EvaluateWithoutRow(&val);
-    status = expr_ctx->root()->GetFnContextError(expr_ctx);
+    status = expr_ctx->GetFnContextError();
     if (!status.ok()) goto error;
-
     // Check for mem limit exceeded.
     status = state.CheckQueryState();
     if (!status.ok()) goto error;

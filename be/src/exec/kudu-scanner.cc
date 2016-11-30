@@ -122,7 +122,7 @@ Status KuduScanner::GetNext(RowBatch* row_batch, bool* eos) {
 
 void KuduScanner::Close() {
   if (scanner_) CloseCurrentClientScanner();
-  Expr::Close(conjunct_ctxs_, state_);
+  ExprContext::Close(conjunct_ctxs_, state_);
 }
 
 Status KuduScanner::OpenNextScanToken(const string& scan_token)  {

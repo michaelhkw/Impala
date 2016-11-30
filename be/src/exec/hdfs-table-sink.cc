@@ -85,10 +85,10 @@ Status HdfsTableSink::PrepareExprs(RuntimeState* state) {
   // Prepare select list expressions.
   // Disable codegen for these - they would be unused anyway.
   // TODO: codegen table sink
-  RETURN_IF_ERROR(
-      Expr::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
-  RETURN_IF_ERROR(
-      Expr::Prepare(partition_key_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
+  RETURN_IF_ERROR(ExprContext::Prepare(output_expr_ctxs_, state, row_desc_,
+      expr_mem_tracker_.get()));
+  RETURN_IF_ERROR(ExprContext::Prepare(partition_key_expr_ctxs_, state, row_desc_,
+      expr_mem_tracker_.get()));
 
   // Prepare partition key exprs and gather dynamic partition key exprs.
   for (size_t i = 0; i < partition_key_expr_ctxs_.size(); ++i) {
@@ -120,10 +120,15 @@ Status HdfsTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracke
   VLOG_QUERY << "Random seed: " << seed;
   srand(seed);
 
-  RETURN_IF_ERROR(Expr::CreateExprTrees(
-      state->obj_pool(), partition_key_texprs_, &partition_key_expr_ctxs_));
-  RETURN_IF_ERROR(Expr::CreateExprTrees(
-      state->obj_pool(), select_list_texprs_, &output_expr_ctxs_));
+  ObjectPool* pool = state->obj_pool();
+  vector<Expr*> partition_key_exprs;
+  RETURN_IF_ERROR(Expr::CreateExprTrees(pool, partition_key_texprs_,
+      &partition_key_exprs));
+  ExprContext::Create(pool, partition_key_exprs, &partition_key_expr_ctxs_);
+
+  vector<Expr*> output_exprs;
+  RETURN_IF_ERROR(Expr::CreateExprTrees(pool, select_list_texprs_, &output_exprs));
+  ExprContext::Create(pool, output_exprs, &output_expr_ctxs_);
 
   // Resolve table id and set input tuple descriptor.
   table_desc_ = static_cast<const HdfsTableDescriptor*>(
@@ -156,8 +161,8 @@ Status HdfsTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracke
 }
 
 Status HdfsTableSink::Open(RuntimeState* state) {
-  RETURN_IF_ERROR(Expr::Open(output_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(partition_key_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(output_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(partition_key_expr_ctxs_, state));
 
   // Get file format for default partition in table descriptor, and build a map from
   // partition key values to partition descriptor for multiple output format support. The
@@ -722,8 +727,8 @@ void HdfsTableSink::Close(RuntimeState* state) {
   }
   partition_keys_to_output_partitions_.clear();
 
-  Expr::Close(output_expr_ctxs_, state);
-  Expr::Close(partition_key_expr_ctxs_, state);
+  ExprContext::Close(output_expr_ctxs_, state);
+  ExprContext::Close(partition_key_expr_ctxs_, state);
   DataSink::Close(state);
   closed_ = true;
 }
@@ -737,8 +742,8 @@ string HdfsTableSink::DebugString() const {
   stringstream out;
   out << "HdfsTableSink(overwrite=" << (overwrite_ ? "true" : "false")
       << " table_desc=" << table_desc_->DebugString()
-      << " partition_key_exprs=" << Expr::DebugString(partition_key_expr_ctxs_)
-      << " output_exprs=" << Expr::DebugString(output_expr_ctxs_)
+      << " partition_key_exprs=" << ExprContext::DebugString(partition_key_expr_ctxs_)
+      << " output_exprs=" << ExprContext::DebugString(output_expr_ctxs_)
       << ")";
   return out.str();
 }

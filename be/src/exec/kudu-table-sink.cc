@@ -86,11 +86,13 @@ KuduTableSink::KuduTableSink(const RowDescriptor& row_desc,
 
 Status KuduTableSink::PrepareExprs(RuntimeState* state) {
   // From the thrift expressions create the real exprs.
+  vector<Expr*> output_exprs;
   RETURN_IF_ERROR(Expr::CreateExprTrees(state->obj_pool(), select_list_texprs_,
-                                        &output_expr_ctxs_));
+      &output_exprs));
+  ExprContext::Create(state->obj_pool(), output_exprs, &output_expr_ctxs_);
   // Prepare the exprs to run.
   RETURN_IF_ERROR(
-      Expr::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
+      ExprContext::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
   return Status::OK();
 }
 
@@ -132,7 +134,7 @@ Status KuduTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracke
 }
 
 Status KuduTableSink::Open(RuntimeState* state) {
-  RETURN_IF_ERROR(Expr::Open(output_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(output_expr_ctxs_, state));
 
   int64_t required_mem = FLAGS_kudu_sink_mem_required;
   if (!mem_tracker_->TryConsume(required_mem)) {
@@ -386,7 +388,7 @@ void KuduTableSink::Close(RuntimeState* state) {
     client_.reset();
   }
   SCOPED_TIMER(profile()->total_time_counter());
-  Expr::Close(output_expr_ctxs_, state);
+  ExprContext::Close(output_expr_ctxs_, state);
   DataSink::Close(state);
   closed_ = true;
 }

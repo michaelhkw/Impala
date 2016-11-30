@@ -74,8 +74,10 @@ AggregationNode::AggregationNode(ObjectPool* pool, const TPlanNode& tnode,
 
 Status AggregationNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Init(tnode, state));
+  vector<Expr*> probe_exprs;
   RETURN_IF_ERROR(
-      Expr::CreateExprTrees(pool_, tnode.agg_node.grouping_exprs, &probe_expr_ctxs_));
+      Expr::CreateExprTrees(pool_, tnode.agg_node.grouping_exprs, &probe_exprs));
+  ExprContext::Create(pool_, probe_exprs, &probe_expr_ctxs_);
   for (int i = 0; i < tnode.agg_node.aggregate_functions.size(); ++i) {
     AggFnEvaluator* evaluator;
     RETURN_IF_ERROR(AggFnEvaluator::Create(
@@ -116,7 +118,7 @@ Status AggregationNode::Prepare(RuntimeState* state) {
   DCHECK_EQ(intermediate_tuple_desc_->slots().size(),
       output_tuple_desc_->slots().size());
   RETURN_IF_ERROR(
-      Expr::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(), expr_mem_tracker()));
+      ExprContext::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(), expr_mem_tracker()));
   AddExprCtxsToFree(probe_expr_ctxs_);
 
   // Construct build exprs from intermediate_agg_tuple_desc_
@@ -130,15 +132,14 @@ Status AggregationNode::Prepare(RuntimeState* state) {
     Expr* expr = desc->type().type != TYPE_NULL ?
         new SlotRef(desc) : new SlotRef(desc, TYPE_BOOLEAN);
     state->obj_pool()->Add(expr);
-    build_expr_ctxs_.push_back(new ExprContext(expr));
-    state->obj_pool()->Add(build_expr_ctxs_.back());
+    build_expr_ctxs_.push_back(ExprContext::Create(state->obj_pool(), expr));
   }
   // Construct a new row desc for preparing the build exprs because neither the child's
   // nor this node's output row desc may contain the intermediate tuple, e.g.,
   // in a single-node plan with an intermediate tuple different from the output tuple.
   RowDescriptor build_row_desc(intermediate_tuple_desc_, false);
   RETURN_IF_ERROR(
-      Expr::Prepare(build_expr_ctxs_, state, build_row_desc, expr_mem_tracker()));
+      ExprContext::Prepare(build_expr_ctxs_, state, build_row_desc, expr_mem_tracker()));
   AddExprCtxsToFree(build_expr_ctxs_);
 
   int j = probe_expr_ctxs_.size();
@@ -187,8 +188,8 @@ Status AggregationNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(ExecNode::Open(state));
 
-  RETURN_IF_ERROR(Expr::Open(probe_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(probe_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(build_expr_ctxs_, state));
 
   DCHECK_EQ(aggregate_evaluators_.size(), agg_fn_ctxs_.size());
   for (int i = 0; i < aggregate_evaluators_.size(); ++i) {
@@ -329,8 +330,8 @@ void AggregationNode::Close(RuntimeState* state) {
   }
   if (agg_fn_pool_.get() != NULL) agg_fn_pool_->FreeAll();
 
-  Expr::Close(probe_expr_ctxs_, state);
-  Expr::Close(build_expr_ctxs_, state);
+  ExprContext::Close(probe_expr_ctxs_, state);
+  ExprContext::Close(build_expr_ctxs_, state);
   ExecNode::Close(state);
 }
 
@@ -428,7 +429,7 @@ void AggregationNode::DebugString(int indentation_level, stringstream* out) cons
        << "intermediate_tuple_id=" << intermediate_tuple_id_
        << " output_tuple_id=" << output_tuple_id_
        << " needs_finalize=" << needs_finalize_
-       << " probe_exprs=" << Expr::DebugString(probe_expr_ctxs_)
+       << " probe_exprs=" << ExprContext::DebugString(probe_expr_ctxs_)
        << " agg_exprs=" << AggFnEvaluator::DebugString(aggregate_evaluators_);
   ExecNode::DebugString(indentation_level, out);
   *out << ")";

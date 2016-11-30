@@ -29,8 +29,7 @@ class TExprNode;
 /// interface supports CollectionVals.
 class IsNotEmptyPredicate: public Predicate {
  public:
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc);
   virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
   virtual BooleanVal GetBooleanVal(ExprContext* context, const TupleRow* row);
   virtual std::string DebugString() const;

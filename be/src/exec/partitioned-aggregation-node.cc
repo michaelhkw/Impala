@@ -145,8 +145,10 @@ PartitionedAggregationNode::PartitionedAggregationNode(
 
 Status PartitionedAggregationNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Init(tnode, state));
+  vector<Expr*> grouping_exprs;
   RETURN_IF_ERROR(
-      Expr::CreateExprTrees(pool_, tnode.agg_node.grouping_exprs, &grouping_expr_ctxs_));
+      Expr::CreateExprTrees(pool_, tnode.agg_node.grouping_exprs, &grouping_exprs));
+  ExprContext::Create(pool_, grouping_exprs, &grouping_expr_ctxs_);
   for (int i = 0; i < tnode.agg_node.aggregate_functions.size(); ++i) {
     AggFnEvaluator* evaluator;
     RETURN_IF_ERROR(
@@ -211,7 +213,7 @@ Status PartitionedAggregationNode::Prepare(RuntimeState* state) {
   DCHECK_EQ(intermediate_tuple_desc_->slots().size(),
         output_tuple_desc_->slots().size());
 
-  RETURN_IF_ERROR(Expr::Prepare(grouping_expr_ctxs_, state, child(0)->row_desc(),
+  RETURN_IF_ERROR(ExprContext::Prepare(grouping_expr_ctxs_, state, child(0)->row_desc(),
       expr_mem_tracker()));
   AddExprCtxsToFree(grouping_expr_ctxs_);
 
@@ -224,8 +226,7 @@ Status PartitionedAggregationNode::Prepare(RuntimeState* state) {
     Expr* expr = desc->type().type != TYPE_NULL ?
         new SlotRef(desc) : new SlotRef(desc, TYPE_BOOLEAN);
     state->obj_pool()->Add(expr);
-    build_expr_ctxs_.push_back(new ExprContext(expr));
-    state->obj_pool()->Add(build_expr_ctxs_.back());
+    build_expr_ctxs_.push_back(ExprContext::Create(state->obj_pool(), expr));
     if (expr->type().IsVarLenStringType()) {
       string_grouping_exprs_.push_back(i);
     }
@@ -234,9 +235,8 @@ Status PartitionedAggregationNode::Prepare(RuntimeState* state) {
   // nor this node's output row desc may contain the intermediate tuple, e.g.,
   // in a single-node plan with an intermediate tuple different from the output tuple.
   intermediate_row_desc_.reset(new RowDescriptor(intermediate_tuple_desc_, false));
-  RETURN_IF_ERROR(
-      Expr::Prepare(build_expr_ctxs_, state, *intermediate_row_desc_,
-                    expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(build_expr_ctxs_, state, *intermediate_row_desc_,
+      expr_mem_tracker()));
   AddExprCtxsToFree(build_expr_ctxs_);
 
   int j = grouping_expr_ctxs_.size();
@@ -297,8 +297,8 @@ Status PartitionedAggregationNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(ExecNode::Open(state));
 
-  RETURN_IF_ERROR(Expr::Open(grouping_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(grouping_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(build_expr_ctxs_, state));
 
   DCHECK_EQ(aggregate_evaluators_.size(), agg_fn_ctxs_.size());
   for (int i = 0; i < aggregate_evaluators_.size(); ++i) {
@@ -721,8 +721,8 @@ void PartitionedAggregationNode::Close(RuntimeState* state) {
     state->block_mgr()->ClearReservations(block_mgr_client_);
   }
 
-  Expr::Close(grouping_expr_ctxs_, state);
-  Expr::Close(build_expr_ctxs_, state);
+  ExprContext::Close(grouping_expr_ctxs_, state);
+  ExprContext::Close(build_expr_ctxs_, state);
   ExecNode::Close(state);
 }
 
@@ -1155,7 +1155,7 @@ void PartitionedAggregationNode::DebugString(int indentation_level,
        << "intermediate_tuple_id=" << intermediate_tuple_id_
        << " output_tuple_id=" << output_tuple_id_
        << " needs_finalize=" << needs_finalize_
-       << " grouping_exprs=" << Expr::DebugString(grouping_expr_ctxs_)
+       << " grouping_exprs=" << ExprContext::DebugString(grouping_expr_ctxs_)
        << " agg_exprs=" << AggFnEvaluator::DebugString(aggregate_evaluators_);
   ExecNode::DebugString(indentation_level, out);
   *out << ")";

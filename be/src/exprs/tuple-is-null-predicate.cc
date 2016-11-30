@@ -41,9 +41,8 @@ TupleIsNullPredicate::TupleIsNullPredicate(const TExprNode& node)
                node.tuple_is_null_pred.tuple_ids.end()) {
 }
 
-Status TupleIsNullPredicate::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                                     ExprContext* ctx) {
-  RETURN_IF_ERROR(Expr::Prepare(state, row_desc, ctx));
+Status TupleIsNullPredicate::Init(RuntimeState* state, const RowDescriptor& row_desc) {
+  RETURN_IF_ERROR(Expr::Init(state, row_desc));
   DCHECK_EQ(0, children_.size());
   // Resolve tuple ids to tuple indexes.
   for (int i = 0; i < tuple_ids_.size(); ++i) {

@@ -362,10 +362,11 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id,
 
   if (sink.output_partition.type == TPartitionType::HASH_PARTITIONED) {
     // TODO: move this to Init()? would need to save 'sink' somewhere
-    Status status =
-        Expr::CreateExprTrees(pool, sink.output_partition.partition_exprs,
-                              &partition_expr_ctxs_);
+    vector<Expr*> partition_exprs;
+    Status status = Expr::CreateExprTrees(pool, sink.output_partition.partition_exprs,
+        &partition_exprs);
     DCHECK(status.ok());
+    ExprContext::Create(pool, partition_exprs, &partition_expr_ctxs_);
   }
 }
 
@@ -387,7 +388,7 @@ Status DataStreamSender::Prepare(RuntimeState* state, MemTracker* parent_mem_tra
   SCOPED_TIMER(profile_->total_time_counter());
 
   RETURN_IF_ERROR(
-      Expr::Prepare(partition_expr_ctxs_, state, row_desc_, mem_tracker_.get()));
+      ExprContext::Prepare(partition_expr_ctxs_, state, row_desc_, mem_tracker_.get()));
 
   bytes_sent_counter_ = ADD_COUNTER(profile(), "BytesSent", TUnit::BYTES);
   uncompressed_bytes_counter_ =
@@ -412,7 +413,7 @@ Status DataStreamSender::Prepare(RuntimeState* state, MemTracker* parent_mem_tra
 }
 
 Status DataStreamSender::Open(RuntimeState* state) {
-  return Expr::Open(partition_expr_ctxs_, state);
+  return ExprContext::Open(partition_expr_ctxs_, state);
 }
 
 Status DataStreamSender::Send(RuntimeState* state, RowBatch* batch) {
@@ -482,7 +483,7 @@ void DataStreamSender::Close(RuntimeState* state) {
   for (int i = 0; i < channels_.size(); ++i) {
     channels_[i]->Teardown(state);
   }
-  Expr::Close(partition_expr_ctxs_, state);
+  ExprContext::Close(partition_expr_ctxs_, state);
   DataSink::Close(state);
   closed_ = true;
 }

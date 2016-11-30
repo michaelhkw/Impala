@@ -236,7 +236,7 @@ void TopNNode::PrepareForOutput() {
 void TopNNode::DebugString(int indentation_level, stringstream* out) const {
   *out << string(indentation_level * 2, ' ');
   *out << "TopNNode("
-      << Expr::DebugString(sort_exec_exprs_.lhs_ordering_expr_ctxs());
+      << ExprContext::DebugString(sort_exec_exprs_.lhs_ordering_expr_ctxs());
   for (int i = 0; i < is_asc_order_.size(); ++i) {
     *out << (i > 0 ? " " : "")
          << (is_asc_order_[i] ? "asc" : "desc")

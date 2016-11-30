@@ -62,13 +62,12 @@ class HiveUdfCall : public Expr {
  public:
   /// Must be called before creating any HiveUdfCall instances. This is called at impalad
   /// startup time.
-  static Status Init();
+  static Status InitEnv();
 
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
-  virtual Status Open(RuntimeState* state, ExprContext* context,
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc);
+  virtual Status OpenContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
-  virtual void Close(RuntimeState* state, ExprContext* context,
+  virtual void CloseContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
 
   virtual BooleanVal GetBooleanVal(ExprContext* ctx, const TupleRow*);
@@ -88,7 +87,7 @@ class HiveUdfCall : public Expr {
   friend class Expr;
   friend class StringFunctions;
 
-  HiveUdfCall(const TExprNode& node);
+  HiveUdfCall(const TExprNode& node, int fn_context_index);
   virtual std::string DebugString() const;
 
  private:

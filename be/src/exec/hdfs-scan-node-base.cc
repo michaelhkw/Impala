@@ -109,9 +109,10 @@ Status HdfsScanNodeBase::Init(const TPlanNode& tnode, RuntimeState* state) {
 
   // Add collection item conjuncts
   for (const auto& entry: tnode.hdfs_scan_node.collection_conjuncts) {
+    vector<Expr*> conjuncts;
+    RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, entry.second, &conjuncts));
     DCHECK(conjuncts_map_[entry.first].empty());
-    RETURN_IF_ERROR(
-        Expr::CreateExprTrees(pool_, entry.second, &conjuncts_map_[entry.first]));
+    ExprContext::Create(pool_, conjuncts, &conjuncts_map_[entry.first]);
   }
 
   const TQueryOptions& query_options = state->query_options();
@@ -129,8 +130,9 @@ Status HdfsScanNodeBase::Init(const TPlanNode& tnode, RuntimeState* state) {
     }
 
     FilterContext filter_ctx;
-    RETURN_IF_ERROR(
-        Expr::CreateExprTree(pool_, target.target_expr, &filter_ctx.expr_ctx));
+    Expr* filter_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, target.target_expr, &filter_expr));
+    filter_ctx.expr_ctx = ExprContext::Create(pool_, filter_expr);
     filter_ctx.filter = state->filter_bank()->RegisterFilter(filter, false);
 
     string filter_profile_title = Substitute("Filter $0 ($1)", filter.filter_id,
@@ -166,8 +168,8 @@ Status HdfsScanNodeBase::Prepare(RuntimeState* state) {
     if (tuple_desc == tuple_desc_) continue;
     RowDescriptor* collection_row_desc =
         state->obj_pool()->Add(new RowDescriptor(tuple_desc, /* is_nullable */ false));
-    RETURN_IF_ERROR(
-        Expr::Prepare(entry.second, state, *collection_row_desc, expr_mem_tracker()));
+    RETURN_IF_ERROR(ExprContext::Prepare(entry.second, state, *collection_row_desc,
+        expr_mem_tracker()));
   }
 
   // One-time initialisation of state that is constant across scan ranges
@@ -357,7 +359,7 @@ Status HdfsScanNodeBase::Open(RuntimeState* state) {
   for (const auto& entry: conjuncts_map_) {
     // conjuncts_ are already opened in ExecNode::Open()
     if (entry.first == tuple_id_) continue;
-    RETURN_IF_ERROR(Expr::Open(entry.second, state));
+    RETURN_IF_ERROR(ExprContext::Open(entry.second, state));
   }
 
   for (FilterContext& filter: filter_ctxs_) RETURN_IF_ERROR(filter.expr_ctx->Open(state));
@@ -463,7 +465,7 @@ void HdfsScanNodeBase::Close(RuntimeState* state) {
   for (const auto& tid_conjunct: conjuncts_map_) {
     // conjuncts_ are already closed in ExecNode::Close()
     if (tid_conjunct.first == tuple_id_) continue;
-    Expr::Close(tid_conjunct.second, state);
+    ExprContext::Close(tid_conjunct.second, state);
   }
 
   for (auto& filter_ctx: filter_ctxs_) filter_ctx.expr_ctx->Close(state);

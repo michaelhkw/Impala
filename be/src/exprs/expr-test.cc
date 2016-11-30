@@ -1032,25 +1032,26 @@ void TestSingleLiteralConstruction(
   MemTracker tracker;
 
   Expr* expr = pool.Add(new Literal(type, value));
-  ExprContext ctx(expr);
-  EXPECT_OK(ctx.Prepare(&state, desc, &tracker));
-  EXPECT_OK(ctx.Open(&state));
-  EXPECT_EQ(0, RawValue::Compare(ctx.GetValue(NULL), &value, type))
+  ExprContext* ctx = ExprContext::Create(&pool, expr);
+  EXPECT_OK(ctx->Prepare(&state, desc, &tracker));
+  EXPECT_OK(ctx->Open(&state));
+  EXPECT_EQ(0, RawValue::Compare(ctx->GetValue(NULL), &value, type))
       << "type: " << type << ", value: " << value;
-  ctx.Close(&state);
+  ctx->Close(&state);
   state.ReleaseResources();
 }
 
 TEST_F(ExprTest, NullLiteral) {
   for (int type = TYPE_BOOLEAN; type != TYPE_DATE; ++type) {
+    ObjectPool pool;
     NullLiteral expr(static_cast<PrimitiveType>(type));
-    ExprContext ctx(&expr);
+    ExprContext* ctx = ExprContext::Create(&pool, &expr);
     RuntimeState state{TQueryCtx(), ExecEnv::GetInstance(), "test-pool"};
     MemTracker tracker;
-    EXPECT_OK(ctx.Prepare(&state, RowDescriptor(), &tracker));
-    EXPECT_OK(ctx.Open(&state));
-    EXPECT_TRUE(ctx.GetValue(NULL) == NULL);
-    ctx.Close(&state);
+    EXPECT_OK(ctx->Prepare(&state, RowDescriptor(), &tracker));
+    EXPECT_OK(ctx->Open(&state));
+    EXPECT_TRUE(ctx->GetValue(NULL) == NULL);
+    ctx->Close(&state);
     state.ReleaseResources();
   }
 }

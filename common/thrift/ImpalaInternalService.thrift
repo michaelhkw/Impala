@@ -355,7 +355,7 @@ struct TPlanFragmentInstanceCtx {
   // If there is a coordinator instance, it is the first one, with index 0.
   1: required Types.TUniqueId fragment_instance_id
 
-  // Index of this fragment instance accross all instances of its parent fragment,
+  // Index of this fragment instance across all instances of its parent fragment,
   // range [0, TPlanFragmentCtx.num_fragment_instances).
   2: required i32 per_fragment_instance_idx
 

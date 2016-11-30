@@ -288,9 +288,9 @@ class DataStreamTest : public testing::Test {
   // Create a tuple comparator to sort in ascending order on the single bigint column.
   void CreateTupleComparator() {
     SlotRef* lhs_slot = obj_pool_.Add(new SlotRef(TYPE_BIGINT, 0));
-    lhs_slot_ctx_ = obj_pool_.Add(new ExprContext(lhs_slot));
+    lhs_slot_ctx_ = ExprContext::Create(&obj_pool_, lhs_slot);
     SlotRef* rhs_slot = obj_pool_.Add(new SlotRef(TYPE_BIGINT, 0));
-    rhs_slot_ctx_ = obj_pool_.Add(new ExprContext(rhs_slot));
+    rhs_slot_ctx_ = ExprContext::Create(&obj_pool_, rhs_slot);
 
     lhs_slot_ctx_->Prepare(NULL, *row_desc_, &tracker_);
     rhs_slot_ctx_->Prepare(NULL, *row_desc_, &tracker_);

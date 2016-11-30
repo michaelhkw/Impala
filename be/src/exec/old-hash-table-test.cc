@@ -56,19 +56,19 @@ class OldHashTableTest : public testing::Test {
     // simplest.  The purpose of these tests is to exercise the hash map
     // internals so a simple build/probe expr is fine.
     Expr* expr = pool_.Add(new SlotRef(TYPE_INT, 0));
-    build_expr_ctxs_.push_back(pool_.Add(new ExprContext(expr)));
-    ASSERT_OK(Expr::Prepare(build_expr_ctxs_, NULL, desc, &tracker_));
-    ASSERT_OK(Expr::Open(build_expr_ctxs_, NULL));
+    build_expr_ctxs_.push_back(ExprContext::Create(&pool_, expr));
+    ASSERT_OK(ExprContext::Prepare(build_expr_ctxs_, NULL, desc, &tracker_));
+    ASSERT_OK(ExprContext::Open(build_expr_ctxs_, NULL));
 
     expr = pool_.Add(new SlotRef(TYPE_INT, 0));
-    probe_expr_ctxs_.push_back(pool_.Add(new ExprContext(expr)));
-    ASSERT_OK(Expr::Prepare(probe_expr_ctxs_, NULL, desc, &tracker_));
-    ASSERT_OK(Expr::Open(probe_expr_ctxs_, NULL));
+    probe_expr_ctxs_.push_back(ExprContext::Create(&pool_, expr));
+    ASSERT_OK(ExprContext::Prepare(probe_expr_ctxs_, NULL, desc, &tracker_));
+    ASSERT_OK(ExprContext::Open(probe_expr_ctxs_, NULL));
   }
 
   virtual void TearDown() {
-    Expr::Close(build_expr_ctxs_, NULL);
-    Expr::Close(probe_expr_ctxs_, NULL);
+    ExprContext::Close(build_expr_ctxs_, NULL);
+    ExprContext::Close(probe_expr_ctxs_, NULL);
   }
 
   TupleRow* CreateTupleRow(int32_t val) {

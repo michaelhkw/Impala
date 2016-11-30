@@ -45,11 +45,13 @@ HBaseTableSink::HBaseTableSink(const RowDescriptor& row_desc,
 
 Status HBaseTableSink::PrepareExprs(RuntimeState* state) {
   // From the thrift expressions create the real exprs.
-  RETURN_IF_ERROR(Expr::CreateExprTrees(state->obj_pool(), select_list_texprs_,
-                                        &output_expr_ctxs_));
+  vector<Expr*> output_exprs;
+  RETURN_IF_ERROR(
+      Expr::CreateExprTrees(state->obj_pool(), select_list_texprs_, &output_exprs));
+  ExprContext::Create(state->obj_pool(), output_exprs, &output_expr_ctxs_);
   // Prepare the exprs to run.
   RETURN_IF_ERROR(
-      Expr::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
+      ExprContext::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
   return Status::OK();
 }
 
@@ -81,7 +83,7 @@ Status HBaseTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_track
 }
 
 Status HBaseTableSink::Open(RuntimeState* state) {
-  return Expr::Open(output_expr_ctxs_, state);
+  return ExprContext::Open(output_expr_ctxs_, state);
 }
 
 Status HBaseTableSink::Send(RuntimeState* state, RowBatch* batch) {
@@ -108,7 +110,7 @@ void HBaseTableSink::Close(RuntimeState* state) {
     hbase_table_writer_->Close(state);
     hbase_table_writer_.reset(NULL);
   }
-  Expr::Close(output_expr_ctxs_, state);
+  ExprContext::Close(output_expr_ctxs_, state);
   DataSink::Close(state);
   closed_ = true;
 }

@@ -67,10 +67,12 @@ struct JniContext {
       output_anyval(NULL) {}
 };
 
-HiveUdfCall::HiveUdfCall(const TExprNode& node) : Expr(node), input_buffer_size_(0) {
+HiveUdfCall::HiveUdfCall(const TExprNode& node, int fn_context_index)
+    : Expr(node, false, fn_context_index), input_buffer_size_(0) {
   DCHECK_EQ(node.node_type, TExprNodeType::FUNCTION_CALL);
   DCHECK_EQ(node.fn.binary_type, TFunctionBinaryType::JAVA);
   DCHECK(executor_cl_ != NULL) << "Init() was not called!";
+  DCHECK_GE(fn_context_index, 0);
 }
 
 AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, const TupleRow* row) {
@@ -152,7 +154,7 @@ AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, const TupleRow* row) {
   return jni_ctx->output_anyval;
 }
 
-Status HiveUdfCall::Init() {
+Status HiveUdfCall::InitEnv() {
   DCHECK(executor_cl_ == NULL) << "Init() already called!";
   JNIEnv* env = getJNIEnv();
   if (env == NULL) return Status("Failed to get/create JVM");
@@ -169,9 +171,8 @@ Status HiveUdfCall::Init() {
   return Status::OK();
 }
 
-Status HiveUdfCall::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                            ExprContext* ctx) {
-  RETURN_IF_ERROR(Expr::Prepare(state, row_desc, ctx));
+Status HiveUdfCall::Init(RuntimeState* state, const RowDescriptor& row_desc) {
+  RETURN_IF_ERROR(Expr::Init(state, row_desc));
 
   // Copy the Hive Jar from hdfs to local file system.
   RETURN_IF_ERROR(LibCache::instance()->GetLocalLibPath(
@@ -185,18 +186,14 @@ Status HiveUdfCall::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
     // one buffer for all rows and we never copy the entire buffer.
     input_buffer_size_ = BitUtil::RoundUpNumBytes(input_buffer_size_) * 8;
   }
-
-  // Register FunctionContext in ExprContext
-  RegisterFunctionContext(ctx, state);
-
   return Status::OK();
 }
 
-Status HiveUdfCall::Open(RuntimeState* state, ExprContext* ctx,
-                         FunctionContext::FunctionStateScope scope) {
-  RETURN_IF_ERROR(Expr::Open(state, ctx, scope));
+Status HiveUdfCall::OpenContext(RuntimeState* state, ExprContext* ctx,
+    FunctionContext::FunctionStateScope scope) {
+  RETURN_IF_ERROR(Expr::OpenContext(state, ctx, scope));
 
-  // Create a JniContext in this thread's FunctionContext
+  // Create a JniContext in this thread's FunctionContext.
   FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
   JniContext* jni_ctx = new JniContext;
   fn_ctx->SetFunctionState(FunctionContext::THREAD_LOCAL, jni_ctx);
@@ -236,9 +233,9 @@ Status HiveUdfCall::Open(RuntimeState* state, ExprContext* ctx,
   return Status::OK();
 }
 
-void HiveUdfCall::Close(RuntimeState* state, ExprContext* ctx,
+void HiveUdfCall::CloseContext(RuntimeState* state, ExprContext* ctx,
                         FunctionContext::FunctionStateScope scope) {
-  if (fn_context_index_ != -1) {
+  if (ctx->opened()) {
     FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
     JniContext* jni_ctx = reinterpret_cast<JniContext*>(
         fn_ctx->GetFunctionState(FunctionContext::THREAD_LOCAL));
@@ -265,12 +262,10 @@ void HiveUdfCall::Close(RuntimeState* state, ExprContext* ctx,
       }
       jni_ctx->output_anyval = NULL;
       delete jni_ctx;
-    } else {
-      DCHECK(!ctx->opened_);
     }
   }
 
-  Expr::Close(state, ctx, scope);
+  Expr::CloseContext(state, ctx, scope);
 }
 
 Status HiveUdfCall::GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn) {

@@ -138,8 +138,10 @@ ExecNode::~ExecNode() {
 }
 
 Status ExecNode::Init(const TPlanNode& tnode, RuntimeState* state) {
+  vector<Expr*> conjuncts;
   RETURN_IF_ERROR(
-      Expr::CreateExprTrees(pool_, tnode.conjuncts, &conjunct_ctxs_));
+      Expr::CreateExprTrees(pool_, tnode.conjuncts, &conjuncts));
+  ExprContext::Create(pool_, conjuncts, &conjunct_ctxs_);
   return Status::OK();
 }
 
@@ -157,7 +159,8 @@ Status ExecNode::Prepare(RuntimeState* state) {
       bind<int64_t>(&RuntimeProfile::UnitsPerSecond, rows_returned_counter_,
         runtime_profile()->total_time_counter()));
 
-  RETURN_IF_ERROR(Expr::Prepare(conjunct_ctxs_, state, row_desc(), expr_mem_tracker()));
+  RETURN_IF_ERROR(
+      ExprContext::Prepare(conjunct_ctxs_, state, row_desc(), expr_mem_tracker()));
   AddExprCtxsToFree(conjunct_ctxs_);
   for (int i = 0; i < children_.size(); ++i) {
     RETURN_IF_ERROR(children_[i]->Prepare(state));
@@ -175,7 +178,7 @@ void ExecNode::Codegen(RuntimeState* state) {
 
 Status ExecNode::Open(RuntimeState* state) {
   RETURN_IF_ERROR(ExecDebugAction(TExecNodePhase::OPEN, state));
-  return Expr::Open(conjunct_ctxs_, state);
+  return ExprContext::Open(conjunct_ctxs_, state);
 }
 
 Status ExecNode::Reset(RuntimeState* state) {
@@ -196,7 +199,7 @@ void ExecNode::Close(RuntimeState* state) {
   for (int i = 0; i < children_.size(); ++i) {
     children_[i]->Close(state);
   }
-  Expr::Close(conjunct_ctxs_, state);
+  ExprContext::Close(conjunct_ctxs_, state);
 
   if (mem_tracker() != NULL && mem_tracker()->consumption() != 0) {
     LOG(WARNING) << "Query " << state->query_id() << " may have leaked memory." << endl
@@ -385,7 +388,7 @@ string ExecNode::DebugString() const {
 }
 
 void ExecNode::DebugString(int indentation_level, stringstream* out) const {
-  *out << " conjuncts=" << Expr::DebugString(conjunct_ctxs_);
+  *out << " conjuncts=" << ExprContext::DebugString(conjunct_ctxs_);
   for (int i = 0; i < children_.size(); ++i) {
     *out << "\n";
     children_[i]->DebugString(indentation_level + 1, out);

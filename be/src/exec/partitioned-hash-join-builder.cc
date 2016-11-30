@@ -79,9 +79,9 @@ Status PhjBuilder::Init(RuntimeState* state,
     const vector<TEqJoinCondition>& eq_join_conjuncts,
     const vector<TRuntimeFilterDesc>& filters) {
   for (const TEqJoinCondition& eq_join_conjunct : eq_join_conjuncts) {
-    ExprContext* ctx;
-    RETURN_IF_ERROR(Expr::CreateExprTree(&pool_, eq_join_conjunct.right, &ctx));
-    build_expr_ctxs_.push_back(ctx);
+    Expr* build_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(&pool_, eq_join_conjunct.right, &build_expr));
+    build_expr_ctxs_.push_back(ExprContext::Create(&pool_, build_expr));
     is_not_distinct_from_.push_back(eq_join_conjunct.is_not_distinct_from);
   }
 
@@ -98,7 +98,9 @@ Status PhjBuilder::Init(RuntimeState* state,
     }
     FilterContext filter_ctx;
     filter_ctx.filter = state->filter_bank()->RegisterFilter(filter, true);
-    RETURN_IF_ERROR(Expr::CreateExprTree(&pool_, filter.src_expr, &filter_ctx.expr_ctx));
+    Expr* filter_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(&pool_, filter.src_expr, &filter_expr));
+    filter_ctx.expr_ctx = ExprContext::Create(&pool_, filter_expr);
     filters_.push_back(filter_ctx);
   }
   return Status::OK();
@@ -111,7 +113,7 @@ string PhjBuilder::GetName() {
 Status PhjBuilder::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
   RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
   RETURN_IF_ERROR(
-      Expr::Prepare(build_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
+      ExprContext::Prepare(build_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
   expr_ctxs_to_free_.insert(
       expr_ctxs_to_free_.end(), build_expr_ctxs_.begin(), build_expr_ctxs_.end());
 
@@ -150,7 +152,7 @@ Status PhjBuilder::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) 
 }
 
 Status PhjBuilder::Open(RuntimeState* state) {
-  RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(build_expr_ctxs_, state));
   for (const FilterContext& filter : filters_) {
     RETURN_IF_ERROR(filter.expr_ctx->Open(state));
   }
@@ -228,7 +230,7 @@ void PhjBuilder::Close(RuntimeState* state) {
   ExprContext::FreeLocalAllocations(expr_ctxs_to_free_);
   CloseAndDeletePartitions();
   if (ht_ctx_ != NULL) ht_ctx_->Close();
-  Expr::Close(build_expr_ctxs_, state);
+  ExprContext::Close(build_expr_ctxs_, state);
   for (const FilterContext& ctx : filters_) ctx.expr_ctx->Close(state);
   if (block_mgr_client_ != NULL) state->block_mgr()->ClearReservations(block_mgr_client_);
   pool_.Clear();

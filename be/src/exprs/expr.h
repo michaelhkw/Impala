@@ -70,20 +70,42 @@
 ///
 /// A typical usage pattern will look something like:
 /// 1. Expr::CreateExprTrees()
-/// 2. Expr::Prepare()
-/// 3. Expr::Open()
-/// 4. Expr::CloneIfNotExists() [for multi-threaded execution]
+/// 2. ExprContext::Prepare()
+/// 3. ExprContext::Open()
+/// 4. ExprContext::CloneIfNotExists() [for multi-threaded execution]
 /// 5. Evaluate exprs via Get*Val() calls
-/// 6. Expr::Close() [called once per ExprContext, including clones]
+/// 6. ExprContext::Close() [called once per ExprContext, including clones]
 ///
 /// Expr users should use the static Get*Val() wrapper functions to evaluate exprs,
 /// cross-compile the resulting function, and use ReplaceGetValCalls() to create the
 /// codegen'd function. See the comments on these functions for more details. This is a
 /// similar pattern to that used by the cross-compiled compute functions.
 ///
-/// TODO:
-/// - Fix codegen compile time
-/// - Fix perf regressions via extra optimization passes + patching LLVM
+/// --- Relationship with ExprContext and FunctionContext
+///
+/// Expr is shared by multiple threads / multiple fragment instances. An expression in
+/// a query is represented as a tree of Expr whose states are static after initialization
+/// by their Prepare() functions.
+///
+/// ExprContext contains thread private states (e.g. evaluation result, FunctionContext).
+/// This separation allows multiple threads to evaluate the same Expr on different rows
+/// in parallel. An ExprContext object references the root of its corresponding Expr tree
+/// via the field 'root_'.
+///
+/// FunctionContext is the interface of UDF and UDA to the rest of Impala. It is passed
+/// to UDF/UDA for them to store thread-private states specific to the UDF/UDA, propagates
+/// errors and allocates memory. Within each expression, there can be multiple
+/// sub-expressions which require FunctionContexts.
+///
+/// Expressions in exec nodes are expected to be initialized once per fragment and the
+/// expressions' static states are shared among all instances of a fragment. Exec nodes in
+/// each fragment instance will allocate their own ExprContexts and associate them with
+/// the shared Expr object. FunctionContexts are stored in a vector inside ExprContext. An
+/// sub-expression (i.e. a sub-tree of the Expr tree) may own a range inside this vector
+/// whose start and end are indicated by 'fn_context_start_' and 'fn_context_end_'
+/// respectively. 'fn_context_index_' is this Expr's index into the FunctionContexts
+/// vector. This Expr can itself be a sub-expression in another expression. It's -1 if no
+/// FunctionContext is needed.
 
 #ifndef IMPALA_EXPRS_EXPR_H
 #define IMPALA_EXPRS_EXPR_H
@@ -146,24 +168,19 @@ class Expr {
   virtual TimestampVal GetTimestampVal(ExprContext* context, const TupleRow*);
   virtual DecimalVal GetDecimalVal(ExprContext* context, const TupleRow*);
 
-  /// Get the number of digits after the decimal that should be displayed for this value.
-  /// Returns -1 if no scale has been specified (currently the scale is only set for
-  /// doubles set by RoundUpTo). GetValue() must have already been called.
-  /// TODO: is this still necessary?
-  int output_scale() const { return output_scale_; }
+  inline void AddChild(Expr* expr) { children_.push_back(expr); }
+  inline Expr* GetChild(int i) const { return children_[i]; }
+  inline int GetNumChildren() const { return children_.size(); }
 
-  void AddChild(Expr* expr) { children_.push_back(expr); }
-  Expr* GetChild(int i) const { return children_[i]; }
-  int GetNumChildren() const { return children_.size(); }
+  inline const ColumnType& type() const { return type_; }
+  inline bool is_slotref() const { return is_slotref_; }
 
-  const ColumnType& type() const { return type_; }
-  bool is_slotref() const { return is_slotref_; }
+  inline const std::vector<Expr*>& children() const { return children_; }
 
-  const std::vector<Expr*>& children() const { return children_; }
-
-  /// Returns an error status if the function context associated with the
-  /// expr has an error set.
-  Status GetFnContextError(ExprContext* ctx);
+  inline int fn_context_index() const { return fn_context_index_; }
+  inline int NumFnContexts() const {
+    return fn_context_index_end_ - fn_context_index_start_;
+  }
 
   /// Returns true if the expression is considered constant. This must match the
   /// definition of Expr.isConstant() in the frontend. The default implementation returns
@@ -185,33 +202,19 @@ class Expr {
   static bool NeedCodegen(const TExpr& texpr);
 
   /// Create expression tree from the list of nodes contained in texpr within 'pool'.
-  /// Returns the root of expression tree in 'expr' and the corresponding ExprContext in
-  /// 'ctx'.
-  static Status CreateExprTree(ObjectPool* pool, const TExpr& texpr, ExprContext** ctx);
+  /// Returns the root of the expression in 'expr'.
+  static Status CreateExprTree(ObjectPool* pool, const TExpr& texpr, Expr** expr);
 
-  /// Creates vector of ExprContexts containing exprs from the given vector of
-  /// TExprs within 'pool'.  Returns an error if any of the individual conversions caused
-  /// an error, otherwise OK.
+  /// Creates vector of Exprs from the given vector of TExprs within 'pool' and returns
+  /// them in 'exprs'. Returns an error if any ExprTree causes error, otherwise OK.
   static Status CreateExprTrees(ObjectPool* pool, const std::vector<TExpr>& texprs,
-      std::vector<ExprContext*>* ctxs);
+      std::vector<Expr*>* exprs);
 
-  /// Convenience function for preparing multiple expr trees.
-  /// Allocations from 'ctxs' will be counted against 'tracker'.
-  static Status Prepare(const std::vector<ExprContext*>& ctxs, RuntimeState* state,
-                        const RowDescriptor& row_desc, MemTracker* tracker);
-
-  /// Convenience function for opening multiple expr trees.
-  static Status Open(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
-
-  /// Clones each ExprContext for multiple expr trees. 'new_ctxs' must be non-NULL.
-  /// Idempotent: if '*new_ctxs' is empty, a clone of each context in 'ctxs' will be added
-  /// to it, and if non-empty, it is assumed CloneIfNotExists() was already called and the
-  /// call is a no-op. The new ExprContexts are created in state->obj_pool().
-  static Status CloneIfNotExists(const std::vector<ExprContext*>& ctxs,
-      RuntimeState* state, std::vector<ExprContext*>* new_ctxs);
-
-  /// Convenience function for closing multiple expr trees.
-  static void Close(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
+  /// Creates vector of input Exprs of a function call expression 'texpr' Returns error
+  /// if there is any error in creating the ExprContexts for the input expressions.
+  /// Returns OK otherwise.
+  static Status CreateInputExprTrees(ObjectPool* pool, const TExpr& texpr,
+      std::vector<Expr*>* exprs);
 
   /// Create a new literal expr of 'type' with initial 'data'.
   /// data should match the ColumnType (i.e. type == TYPE_INT, data is a int*)
@@ -258,7 +261,6 @@ class Expr {
 
   virtual std::string DebugString() const;
   static std::string DebugString(const std::vector<Expr*>& exprs);
-  static std::string DebugString(const std::vector<ExprContext*>& ctxs);
 
   /// The builtin functions are not called from anywhere in the code and the
   /// symbols are therefore not included in the binary. We call these functions
@@ -266,8 +268,8 @@ class Expr {
   /// not strip these symbols.
   static void InitBuiltinsDummy();
 
-  // Any additions to this enum must be reflected in both GetConstant*() and
-  // GetIrConstant().
+  /// Any additions to this enum must be reflected in both GetConstant*() and
+  /// GetIrConstant().
   enum ExprConstant {
     RETURN_TYPE_SIZE, // int
     RETURN_TYPE_PRECISION, // int
@@ -277,25 +279,26 @@ class Expr {
     ARG_TYPE_SCALE, // int[]
   };
 
-  // Static function for obtaining a runtime constant.  Expr compute functions and
-  // builtins implementing the UDF interface should use this function, rather than
-  // accessing runtime constants directly, so any recognized constants can be inlined via
-  // InlineConstants() in the codegen path. In the interpreted path, this function will
-  // work as-is.
-  //
-  // 'c' determines which constant is returned. The type of the constant is annotated in
-  // the ExprConstant enum above. If the constant is an array, 'i' must be specified and
-  // indicates which element to return. 'i' must always be an immediate integer value so
-  // InlineConstants() can resolve the index, e.g., it cannot be a variable or an
-  // expression like "1 + 1".  For example, if 'c' = ARG_TYPE_SIZE, then 'T' = int and
-  // 0 <= i < children_.size().
-  //
-  // InlineConstants() can be run on the function to replace recognized constants. The
-  // constants are only replaced in the function itself, so any callee functions with
-  // constants to be replaced must be inlined into the function that InlineConstants()
-  // is run on (e.g. by annotating them with IR_ALWAYS_INLINE).
-  //
-  // TODO: implement a loop unroller (or use LLVM's) so we can use GetConstantInt() in loops
+  /// Static function for obtaining a runtime constant.  Expr compute functions and
+  /// builtins implementing the UDF interface should use this function, rather than
+  /// accessing runtime constants directly, so any recognized constants can be inlined
+  /// via InlineConstants() in the codegen path. In the interpreted path, this function
+  /// will work as-is.
+  ///
+  /// 'c' determines which constant is returned. The type of the constant is annotated in
+  /// the ExprConstant enum above. If the constant is an array, 'i' must be specified and
+  /// indicates which element to return. 'i' must always be an immediate integer value so
+  /// InlineConstants() can resolve the index, e.g., it cannot be a variable or an
+  /// expression like "1 + 1".  For example, if 'c' = ARG_TYPE_SIZE, then 'T' = int and
+  /// 0 <= i < children_.size().
+  ///
+  /// InlineConstants() can be run on the function to replace recognized constants. The
+  /// constants are only replaced in the function itself, so any callee functions with
+  /// constants to be replaced must be inlined into the function that InlineConstants()
+  /// is run on (e.g. by annotating them with IR_ALWAYS_INLINE).
+  ///
+  /// TODO: implement a loop unroller (or use LLVM's) so we can use GetConstantInt()
+  /// in loops
   static int GetConstantInt(const FunctionContext& ctx, ExprConstant c, int i = -1);
 
   /// Finds all calls to Expr::GetConstantInt() in 'fn' and replaces them with the
@@ -309,7 +312,7 @@ class Expr {
 
   static const char* LLVM_CLASS_NAME;
 
-  // Expr::GetConstantInt() symbol prefix.
+  /// Expr::GetConstantInt() symbol prefix.
   static const char* GET_CONSTANT_INT_SYMBOL_PREFIX;
 
  protected:
@@ -329,35 +332,34 @@ class Expr {
   friend class FunctionCall;
   friend class ScalarFnCall;
 
-  Expr(const ColumnType& type, bool is_slotref = false);
-  Expr(const TExprNode& node, bool is_slotref = false);
+  Expr(const ColumnType& type, bool is_slotref = false, int fn_context_index = -1);
+  Expr(const TExprNode& node, bool is_slotref = false, int fn_context_index = -1);
 
-  /// Initializes this expr instance for execution. This does not include initializing
-  /// state in the ExprContext; 'context' should only be used to register a
-  /// FunctionContext via RegisterFunctionContext(). Any IR functions must be generated
-  /// here.
-  ///
-  /// Subclasses overriding this function should call Expr::Prepare() to recursively call
-  /// Prepare() on the expr tree.
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* context);
+  /// Initializes this expr instance for execution.
+  /// Subclasses overriding this function should call Expr::Init() to recursively call
+  /// Init() on the expr tree.
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc);
 
   /// Initializes 'context' for execution. If scope if FRAGMENT_LOCAL, both fragment- and
   /// thread-local state should be initialized. Otherwise, if scope is THREAD_LOCAL, only
   /// thread-local state should be initialized.
-  //
-  /// Subclasses overriding this function should call Expr::Open() to recursively call
-  /// Open() on the expr tree.
-  virtual Status Open(RuntimeState* state, ExprContext* context,
+  ///
+  /// Subclasses overriding this function should call Expr::OpenContext() to recursively
+  /// call OpenContext() on all Expr nodes in the expr tree.
+  virtual Status OpenContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
 
-  /// Subclasses overriding this function should call Expr::Close().
-  //
+  /// Subclasses overriding this function should call Expr::CloseContext() on the Expr
+  /// nodes in the expr tree.
+  ///
   /// If scope if FRAGMENT_LOCAL, both fragment- and thread-local state should be torn
   /// down. Otherwise, if scope is THREAD_LOCAL, only thread-local state should be torn
   /// down.
-  virtual void Close(RuntimeState* state, ExprContext* context,
+  virtual void CloseContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
+
+  /// Computes the size of the varargs buffer in bytes (0 bytes if no varargs).
+  virtual int ComputeVarArgsBufferSize() const { return 0; }
 
   /// Cache entry for the library implementing this function.
   LibCacheEntry* cache_entry_;
@@ -368,29 +370,32 @@ class Expr {
   /// recognize if this node is a slotref in order to speed up GetValue()
   const bool is_slotref_;
 
-  /// analysis is done, types are fixed at this point
-  const ColumnType type_;
-  std::vector<Expr*> children_;
-  int output_scale_;
-
   /// Index to pass to ExprContext::fn_context() to retrieve this expr's FunctionContext.
-  /// Set in RegisterFunctionContext(). -1 if this expr does not need a FunctionContext and
-  /// doesn't call RegisterFunctionContext().
-  int fn_context_index_;
+  /// Set when creating the Expr tree. -1 if this expr does not need a FunctionContext.
+  const int fn_context_index_;
+
+  /// ['fn_context_index_start_', 'fn_context_index_end_') is the range of index
+  /// of the FunctionContext belonging to this expression tree (i.e. this Expr and
+  /// all its descendants). It's passed to ExprContext::GetFnContextError() to check
+  /// if there is any error during expression evaluation. Note that even if this expr
+  /// does not have any FunctionContext (i.e. fn_context_index_ == -1), it will have
+  /// a non-empty range if its descendants have any FunctionContexts.
+  int fn_context_index_start_;
+  int fn_context_index_end_;
+
+  /// The type of this Expr.
+  const ColumnType type_;
+
+  std::vector<Expr*> children_;
 
   /// Cached codegened compute function. Exprs should set this in GetCodegendComputeFn().
   llvm::Function* ir_compute_fn_;
-
-  /// Helper function that calls ctx->Register(), sets fn_context_index_, and returns the
-  /// registered FunctionContext.
-  FunctionContext* RegisterFunctionContext(
-      ExprContext* ctx, RuntimeState* state, int varargs_buffer_size = 0);
 
   /// Helper function to create an empty Function* with the appropriate signature to be
   /// returned by GetCodegendComputeFn(). 'name' is the name of the returned Function*.
   /// The arguments to the function are returned in 'args'.
   llvm::Function* CreateIrFunctionPrototype(LlvmCodeGen* codegen, const std::string& name,
-                                            llvm::Value* (*args)[2]);
+      llvm::Value* (*args)[2]);
 
   /// Generates an IR compute function that calls the appropriate interpreted Get*Val()
   /// compute function.
@@ -421,23 +426,38 @@ class Expr {
   friend class ExprCodegenTest;
 
   /// Create a new Expr based on texpr_node.node_type within 'pool'.
-  static Status CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** expr);
+  /// 'fn_context_index' is a pointer to the next available index for FunctionContext.
+  /// An Expr in the tree assigns 'fn_context_index' to itself and bumps it by 1 if the
+  /// it needs a FunctionContext.
+  static Status CreateExpr(ObjectPool* pool, const TExprNode& texpr_node,
+      Expr** expr, int* fn_context_index);
+
+  /// Create expression tree from the vector of nodes contained in 'texpr' within 'pool'.
+  /// Returns the root of expression tree in 'root'. 'node_idx' is the starting index
+  /// into the vector of nodes which this function should start constructing the tree.
+  /// It's updated as the TExprNode is consumed for constructing the expression tree.
+  /// 'use_all_nodes' is true iff all ExprNode in 'texpr' should be consumed to construct
+  /// the expression tree. An error status is returned if 'use_all_nodes' is true but
+  /// not all nodes are consumed in constructing the expression tree.
+  static Status CreateExprTree(ObjectPool* pool, const TExpr& texpr, Expr** root,
+      int* node_idx, bool use_all_nodes);
 
   /// Creates an expr tree for the node rooted at 'node_idx' via depth-first traversal.
   /// parameters
+  ///   pool: Object pool in which Expr created from nodes are stored
   ///   nodes: vector of thrift expression nodes to be translated
   ///   parent: parent of node at node_idx (or NULL for node_idx == 0)
   ///   node_idx:
   ///     in: root of TExprNode tree
   ///     out: next node in 'nodes' that isn't part of tree
   ///   root_expr: out: root of constructed expr tree
-  ///   ctx: out: context of constructed expr tree
+  ///   fn_context_index: pointer to the next available index for FunctionContext
   /// return
   ///   status.ok() if successful
   ///   !status.ok() if tree is inconsistent or corrupt
   static Status CreateTreeFromThrift(ObjectPool* pool,
       const std::vector<TExprNode>& nodes, Expr* parent, int* node_idx,
-      Expr** root_expr, ExprContext** ctx);
+      Expr** root_expr, int* fn_context_index);
 
   /// Static wrappers around the virtual Get*Val() functions. Calls the appropriate
   /// Get*Val() function on expr, passing it the context and row arguments.
@@ -455,7 +475,6 @@ class Expr {
   static StringVal GetStringVal(Expr* expr, ExprContext* context, const TupleRow* row);
   static TimestampVal GetTimestampVal(Expr* expr, ExprContext* context, const TupleRow* row);
   static DecimalVal GetDecimalVal(Expr* expr, ExprContext* context, const TupleRow* row);
-
 
   // Helper function for GetConstantInt() and InlineConstants(): return the constant value
   // given the specific argument and return types.

@@ -58,14 +58,15 @@ using std::pair;
 // Maximum number of arguments the interpretation path supports.
 #define MAX_INTERP_ARGS 20
 
-ScalarFnCall::ScalarFnCall(const TExprNode& node)
-  : Expr(node),
+ScalarFnCall::ScalarFnCall(const TExprNode& node, int fn_context_index)
+  : Expr(node, false, fn_context_index),
     vararg_start_idx_(node.__isset.vararg_start_idx ? node.vararg_start_idx : -1),
     scalar_fn_wrapper_(NULL),
     prepare_fn_(NULL),
     close_fn_(NULL),
     scalar_fn_(NULL) {
   DCHECK_NE(fn_.binary_type, TFunctionBinaryType::JAVA);
+  DCHECK_GE(fn_context_index, 0);
 }
 
 Status ScalarFnCall::LoadPrepareAndCloseFn(LlvmCodeGen* codegen) {
@@ -80,9 +81,8 @@ Status ScalarFnCall::LoadPrepareAndCloseFn(LlvmCodeGen* codegen) {
   return Status::OK();
 }
 
-Status ScalarFnCall::Prepare(RuntimeState* state, const RowDescriptor& desc,
-    ExprContext* context) {
-  RETURN_IF_ERROR(Expr::Prepare(state, desc, context));
+Status ScalarFnCall::Init(RuntimeState* state, const RowDescriptor& desc) {
+  RETURN_IF_ERROR(Expr::Init(state, desc));
 
   if (fn_.scalar_fn.symbol.empty()) {
     // This path is intended to only be used during development to test FE
@@ -96,16 +96,10 @@ Status ScalarFnCall::Prepare(RuntimeState* state, const RowDescriptor& desc,
   }
 
   // Check if the function takes CHAR as input or returns CHAR.
-  FunctionContext::TypeDesc return_type = AnyValUtil::ColumnTypeToTypeDesc(type_);
-  vector<FunctionContext::TypeDesc> arg_types;
   bool has_char_arg_or_result = type_.type == TYPE_CHAR;
-  for (int i = 0; i < children_.size(); ++i) {
-    arg_types.push_back(AnyValUtil::ColumnTypeToTypeDesc(children_[i]->type_));
+  for (int i = 0; !has_char_arg_or_result && i < children_.size(); ++i) {
     has_char_arg_or_result |= children_[i]->type_.type == TYPE_CHAR;
   }
-
-  fn_context_index_ =
-      context->Register(state, return_type, arg_types, ComputeVarArgsBufferSize());
 
   // Use the interpreted path and call the builtin without codegen if any of the
   // followings is true:
@@ -157,22 +151,23 @@ Status ScalarFnCall::Prepare(RuntimeState* state, const RowDescriptor& desc,
     state->AddScalarFnToCodegen(this);
   }
 
-  // For IR UDF, the loading of the Prepare() and Close() functions is deferred until
+  // For IR UDF, the loading of the Init() and CloseContext() functions is deferred until
   // first time GetCodegendComputeFn() is invoked.
   if (!is_ir_udf) RETURN_IF_ERROR(LoadPrepareAndCloseFn(NULL));
   return Status::OK();
 }
 
-Status ScalarFnCall::Open(RuntimeState* state, ExprContext* ctx,
+Status ScalarFnCall::OpenContext(RuntimeState* state, ExprContext* ctx,
     FunctionContext::FunctionStateScope scope) {
   // Opens and inits children
-  RETURN_IF_ERROR(Expr::Open(state, ctx, scope));
+  RETURN_IF_ERROR(Expr::OpenContext(state, ctx, scope));
   FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
+  bool need_interp = scalar_fn_wrapper_ == nullptr;
 
-  if (scalar_fn_wrapper_ == NULL) {
+  if (need_interp) {
     // We're in the interpreted path (i.e. no JIT). Populate our FunctionContext's
     // staging_input_vals, which will be reused across calls to scalar_fn_.
-    DCHECK(scalar_fn_ != NULL);
+    DCHECK(scalar_fn_ != nullptr);
     vector<AnyVal*>* input_vals = fn_ctx->impl()->staging_input_vals();
     for (int i = 0; i < NumFixedArgs(); ++i) {
       AnyVal* input_val;
@@ -192,9 +187,19 @@ Status ScalarFnCall::Open(RuntimeState* state, ExprContext* ctx,
       constant_args.push_back(const_val);
     }
     fn_ctx->impl()->SetConstantArgs(move(constant_args));
+
+    // If we're calling MathFunctions::RoundUpTo(), we need to set output_scale_
+    // which determines how many decimal places are printed.
+    // TODO: revisit this. We should be able to do this if the scale argument is
+    // non-constant.
+    if (fn_.name.function_name == "round" && type_.type == TYPE_DOUBLE) {
+      DCHECK_EQ(children_.size(), 2);
+      IntVal* scale_arg = reinterpret_cast<IntVal*>(constant_args[1]);
+      if (scale_arg != nullptr) ctx->output_scale_ = scale_arg->val;
+    }
   }
 
-  if (scalar_fn_wrapper_ == NULL) {
+  if (need_interp) {
     // Now we have the constant values, cache them so that the interpreted path can
     // call the UDF without reevaluating the arguments. 'staging_input_vals' and
     // 'varargs_buffer' in the FunctionContext are used to pass fixed and variable-length
@@ -224,7 +229,7 @@ Status ScalarFnCall::Open(RuntimeState* state, ExprContext* ctx,
       // be able to trust IsConstant() and switch back to that.
       if (children_[i]->IsLiteral()) {
         const AnyVal* constant_arg = fn_ctx->impl()->constant_args()[i];
-        DCHECK(constant_arg != NULL);
+        DCHECK(constant_arg != nullptr);
         memcpy(input_arg, constant_arg, arg_bytes);
       } else {
         non_constant_args.emplace_back(children_[i], input_arg);
@@ -233,7 +238,7 @@ Status ScalarFnCall::Open(RuntimeState* state, ExprContext* ctx,
     fn_ctx->impl()->SetNonConstantArgs(move(non_constant_args));
   }
 
-  if (prepare_fn_ != NULL) {
+  if (prepare_fn_ != nullptr) {
     if (scope == FunctionContext::FRAGMENT_LOCAL) {
       prepare_fn_(fn_ctx, FunctionContext::FRAGMENT_LOCAL);
       if (fn_ctx->has_error()) return Status(fn_ctx->error_msg());
@@ -242,31 +247,20 @@ Status ScalarFnCall::Open(RuntimeState* state, ExprContext* ctx,
     if (fn_ctx->has_error()) return Status(fn_ctx->error_msg());
   }
 
-  // If we're calling MathFunctions::RoundUpTo(), we need to set output_scale_, which
-  // determines how many decimal places are printed.
-  // TODO: revisit this. We should be able to do this if the scale argument is
-  // non-constant.
-  if (fn_.name.function_name == "round" && type_.type == TYPE_DOUBLE) {
-    DCHECK_EQ(children_.size(), 2);
-    if (children_[1]->IsConstant()) {
-      IntVal scale_arg = children_[1]->GetIntVal(ctx, NULL);
-      output_scale_ = scale_arg.val;
-    }
-  }
-
   return Status::OK();
 }
 
-void ScalarFnCall::Close(RuntimeState* state, ExprContext* context,
-                         FunctionContext::FunctionStateScope scope) {
-  if (fn_context_index_ != -1 && close_fn_ != NULL) {
+void ScalarFnCall::CloseContext(RuntimeState* state, ExprContext* context,
+    FunctionContext::FunctionStateScope scope) {
+  DCHECK_GE(fn_context_index_, 0);
+  if (close_fn_ != NULL) {
     FunctionContext* fn_ctx = context->fn_context(fn_context_index_);
     close_fn_(fn_ctx, FunctionContext::THREAD_LOCAL);
     if (scope == FunctionContext::FRAGMENT_LOCAL) {
       close_fn_(fn_ctx, FunctionContext::FRAGMENT_LOCAL);
     }
   }
-  Expr::Close(state, context, scope);
+  Expr::CloseContext(state, context, scope);
 }
 
 bool ScalarFnCall::IsConstant() const {
@@ -592,7 +586,7 @@ RETURN_TYPE ScalarFnCall::InterpretEval(ExprContext* context, const TupleRow* ro
    // case X:
    //     typedef RETURN_TYPE (*ScalarFnX)(FunctionContext*, const AnyVal& a1, ...,
    //         const AnyVal& aX);
-   //     return reinterpret_cast<ScalarFnn>(scalar_fn_)(fn_ctx, *(*input_vals)[0], ...,
+   //     return reinterpret_cast<ScalarFnX>(scalar_fn_)(fn_ctx, *(*input_vals)[0], ...,
    //         *(*input_vals)[X-1]);
 #define SCALAR_FN_TYPE(n) BOOST_PP_CAT(ScalarFn, n)
 #define INTERP_SCALAR_FN(z, n, unused)                                       \

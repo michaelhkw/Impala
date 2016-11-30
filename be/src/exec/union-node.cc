@@ -48,15 +48,19 @@ Status UnionNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   // Create const_expr_ctx_lists_ from thrift exprs.
   const vector<vector<TExpr>>& const_texpr_lists = tnode.union_node.const_expr_lists;
   for (const vector<TExpr>& texprs : const_texpr_lists) {
+    vector<Expr*> exprs;
+    RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, texprs, &exprs));
     vector<ExprContext*> ctxs;
-    RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, texprs, &ctxs));
+    ExprContext::Create(pool_, exprs, &ctxs);
     const_expr_lists_.push_back(ctxs);
   }
   // Create result_expr_ctx_lists_ from thrift exprs.
   const vector<vector<TExpr>>& result_texpr_lists = tnode.union_node.result_expr_lists;
   for (const vector<TExpr>& texprs : result_texpr_lists) {
+    vector<Expr*> exprs;
+    RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, texprs, &exprs));
     vector<ExprContext*> ctxs;
-    RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, texprs, &ctxs));
+    ExprContext::Create(pool_, exprs, &ctxs);
     child_expr_lists_.push_back(ctxs);
   }
   return Status::OK();
@@ -70,14 +74,14 @@ Status UnionNode::Prepare(RuntimeState* state) {
 
   // Prepare const expr lists.
   for (const vector<ExprContext*>& exprs : const_expr_lists_) {
-    RETURN_IF_ERROR(Expr::Prepare(exprs, state, row_desc(), expr_mem_tracker()));
+    RETURN_IF_ERROR(ExprContext::Prepare(exprs, state, row_desc(), expr_mem_tracker()));
     AddExprCtxsToFree(exprs);
     DCHECK_EQ(exprs.size(), tuple_desc_->slots().size());
   }
 
   // Prepare result expr lists.
   for (int i = 0; i < child_expr_lists_.size(); ++i) {
-    RETURN_IF_ERROR(Expr::Prepare(
+    RETURN_IF_ERROR(ExprContext::Prepare(
         child_expr_lists_[i], state, child(i)->row_desc(), expr_mem_tracker()));
     AddExprCtxsToFree(child_expr_lists_[i]);
     DCHECK_EQ(child_expr_lists_[i].size(), tuple_desc_->slots().size());
@@ -90,11 +94,11 @@ Status UnionNode::Open(RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Open(state));
   // Open const expr lists.
   for (const vector<ExprContext*>& exprs : const_expr_lists_) {
-    RETURN_IF_ERROR(Expr::Open(exprs, state));
+    RETURN_IF_ERROR(ExprContext::Open(exprs, state));
   }
   // Open result expr lists.
   for (const vector<ExprContext*>& exprs : child_expr_lists_) {
-    RETURN_IF_ERROR(Expr::Open(exprs, state));
+    RETURN_IF_ERROR(ExprContext::Open(exprs, state));
   }
 
   // Open and fetch from the first child if there is one. Ensures that rows are
@@ -217,10 +221,10 @@ void UnionNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   child_batch_.reset();
   for (const vector<ExprContext*>& exprs : const_expr_lists_) {
-    Expr::Close(exprs, state);
+    ExprContext::Close(exprs, state);
   }
   for (const vector<ExprContext*>& exprs : child_expr_lists_) {
-    Expr::Close(exprs, state);
+    ExprContext::Close(exprs, state);
   }
   ExecNode::Close(state);
 }

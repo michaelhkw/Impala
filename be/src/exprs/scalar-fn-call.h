@@ -56,14 +56,14 @@ class ScalarFnCall: public Expr {
   friend class Expr;
   friend class RuntimeState;
 
-  ScalarFnCall(const TExprNode& node);
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& desc,
-                         ExprContext* context);
-  virtual Status Open(RuntimeState* state, ExprContext* context,
+  ScalarFnCall(const TExprNode& node, int fn_context_index);
+  virtual Status Init(RuntimeState* state, const RowDescriptor& desc);
+  virtual Status OpenContext(RuntimeState* state, ExprContext* context,
+      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
+  virtual void CloseContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
   virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
-  virtual void Close(RuntimeState* state, ExprContext* context,
-      FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
+  virtual int ComputeVarArgsBufferSize() const override;
 
   /// Needs to be kept in sync with the FE understanding of constness in
   /// FuctionCallExpr.java.
@@ -84,7 +84,7 @@ class ScalarFnCall: public Expr {
   /// If this function has var args, children()[vararg_start_idx_] is the first vararg
   /// argument.
   /// If this function does not have varargs, it is set to -1.
-  int vararg_start_idx_;
+  const int vararg_start_idx_;
 
   /// Vector of all non-constant children expressions that need to be evaluated for
   /// each input row. The first element of each pair is the child expression and the
@@ -140,9 +140,6 @@ class ScalarFnCall: public Expr {
   /// Function to call scalar_fn_. Used in the interpreted path.
   template <typename RETURN_TYPE>
   RETURN_TYPE InterpretEval(ExprContext* context, const TupleRow* row);
-
-  /// Computes the size of the varargs buffer in bytes (0 bytes if no varargs).
-  int ComputeVarArgsBufferSize() const;
 };
 }
 

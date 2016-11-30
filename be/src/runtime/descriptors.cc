@@ -27,6 +27,7 @@
 
 #include "codegen/llvm-codegen.h"
 #include "common/object-pool.h"
+#include "exprs/expr-context.h"
 #include "gen-cpp/Descriptors_types.h"
 #include "gen-cpp/PlanNodes_types.h"
 #include "exprs/expr.h"
@@ -176,14 +177,12 @@ HdfsPartitionDescriptor::HdfsPartitionDescriptor(const THdfsTable& thrift_table,
     file_format_(thrift_partition.fileFormat),
     object_pool_(pool) {
   DecompressLocation(thrift_table, thrift_partition, &location_);
-  for (int i = 0; i < thrift_partition.partitionKeyExprs.size(); ++i) {
-    ExprContext* ctx;
-    // TODO: Move to dedicated Init method and treat Status return correctly
-    Status status = Expr::CreateExprTree(object_pool_,
-        thrift_partition.partitionKeyExprs[i], &ctx);
-    DCHECK(status.ok());
-    partition_key_value_ctxs_.push_back(ctx);
-  }
+  vector<Expr*> partition_key_exprs;
+  // TODO: Move to dedicated Init method and treat Status return correctly
+  Status status = Expr::CreateExprTrees(object_pool_, thrift_partition.partitionKeyExprs,
+      &partition_key_exprs);
+  DCHECK(status.ok());
+  ExprContext::Create(object_pool_, partition_key_exprs, &partition_key_value_ctxs_);
 }
 
 string HdfsPartitionDescriptor::DebugString() const {
@@ -509,9 +508,10 @@ Status DescriptorTbl::PrepareAndOpenPartitionExprs(RuntimeState* state) const {
     for (const auto& part_entry : hdfs_tbl->partition_descriptors()) {
       // TODO: RowDescriptor should arguably be optional in Prepare for known literals
       // Partition exprs are not used in the codegen case.  Don't codegen them.
-      RETURN_IF_ERROR(Expr::Prepare(part_entry.second->partition_key_value_ctxs(), state,
-          RowDescriptor(), state->instance_mem_tracker()));
-      RETURN_IF_ERROR(Expr::Open(part_entry.second->partition_key_value_ctxs(), state));
+      RETURN_IF_ERROR(ExprContext::Prepare(part_entry.second->partition_key_value_ctxs(),
+          state, RowDescriptor(), state->instance_mem_tracker()));
+      RETURN_IF_ERROR(ExprContext::Open(part_entry.second->partition_key_value_ctxs(),
+          state));
     }
   }
   return Status::OK();
@@ -522,7 +522,7 @@ void DescriptorTbl::ClosePartitionExprs(RuntimeState* state) const {
     if (tbl_entry.second->type() != TTableType::HDFS_TABLE) continue;
     HdfsTableDescriptor* hdfs_tbl = static_cast<HdfsTableDescriptor*>(tbl_entry.second);
     for (const auto& part_entry: hdfs_tbl->partition_descriptors()) {
-      Expr::Close(part_entry.second->partition_key_value_ctxs(), state);
+      ExprContext::Close(part_entry.second->partition_key_value_ctxs(), state);
     }
   }
 }

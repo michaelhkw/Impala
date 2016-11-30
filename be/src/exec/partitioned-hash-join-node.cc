@@ -82,14 +82,17 @@ Status PartitionedHashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state
   RETURN_IF_ERROR(builder_->Init(state, eq_join_conjuncts, tnode.runtime_filters));
 
   for (const TEqJoinCondition& eq_join_conjunct : eq_join_conjuncts) {
-    ExprContext* ctx;
-    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjunct.left, &ctx));
-    probe_expr_ctxs_.push_back(ctx);
-    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjunct.right, &ctx));
-    build_expr_ctxs_.push_back(ctx);
+    Expr* probe_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjunct.left, &probe_expr));
+    probe_expr_ctxs_.push_back(ExprContext::Create(pool_, probe_expr));
+    Expr* build_expr;
+    RETURN_IF_ERROR(Expr::CreateExprTree(pool_, eq_join_conjunct.right, &build_expr));
+    build_expr_ctxs_.push_back(ExprContext::Create(pool_, build_expr));
   }
-  RETURN_IF_ERROR(Expr::CreateExprTrees(
-      pool_, tnode.hash_join_node.other_join_conjuncts, &other_join_conjunct_ctxs_));
+  vector<Expr*> other_join_conjuncts;
+  RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, tnode.hash_join_node.other_join_conjuncts,
+      &other_join_conjuncts));
+  ExprContext::Create(pool_, other_join_conjuncts, &other_join_conjunct_ctxs_);
   DCHECK(join_op_ != TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN ||
       eq_join_conjuncts.size() == 1);
   return Status::OK();
@@ -106,10 +109,10 @@ Status PartitionedHashJoinNode::Prepare(RuntimeState* state) {
 
   // build and probe exprs are evaluated in the context of the rows produced by our
   // right and left children, respectively
-  RETURN_IF_ERROR(
-      Expr::Prepare(build_expr_ctxs_, state, child(1)->row_desc(), expr_mem_tracker()));
-  RETURN_IF_ERROR(
-      Expr::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(), expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(build_expr_ctxs_, state, child(1)->row_desc(),
+      expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(probe_expr_ctxs_, state, child(0)->row_desc(),
+      expr_mem_tracker()));
 
   // Build expressions may be evaluated during probing, so must be freed.
   // Probe side expr is not included in QueryMaintenance(). We cache the probe expression
@@ -121,8 +124,8 @@ Status PartitionedHashJoinNode::Prepare(RuntimeState* state) {
   // build and probe tuples; full_row_desc is not necessarily the same as the output row
   // desc, e.g., because semi joins only return the build xor probe tuples
   RowDescriptor full_row_desc(child(0)->row_desc(), child(1)->row_desc());
-  RETURN_IF_ERROR(
-      Expr::Prepare(other_join_conjunct_ctxs_, state, full_row_desc, expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(other_join_conjunct_ctxs_, state, full_row_desc,
+      expr_mem_tracker()));
   AddExprCtxsToFree(other_join_conjunct_ctxs_);
 
   RETURN_IF_ERROR(HashTableCtx::Create(state, build_expr_ctxs_, probe_expr_ctxs_,
@@ -161,9 +164,9 @@ void PartitionedHashJoinNode::Codegen(RuntimeState* state) {
 Status PartitionedHashJoinNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(BlockingJoinNode::Open(state));
-  RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(probe_expr_ctxs_, state));
-  RETURN_IF_ERROR(Expr::Open(other_join_conjunct_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(build_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(probe_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(other_join_conjunct_ctxs_, state));
 
   if (join_op_ == TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN) {
     RETURN_IF_ERROR(InitNullAwareProbePartition());
@@ -240,9 +243,9 @@ void PartitionedHashJoinNode::Close(RuntimeState* state) {
   nulls_build_batch_.reset();
   CloseAndDeletePartitions();
   if (builder_ != NULL) builder_->Close(state);
-  Expr::Close(build_expr_ctxs_, state);
-  Expr::Close(probe_expr_ctxs_, state);
-  Expr::Close(other_join_conjunct_ctxs_, state);
+  ExprContext::Close(build_expr_ctxs_, state);
+  ExprContext::Close(probe_expr_ctxs_, state);
+  ExprContext::Close(other_join_conjunct_ctxs_, state);
   BlockingJoinNode::Close(state);
 }
 
@@ -1008,8 +1011,8 @@ void PartitionedHashJoinNode::AddToDebugString(int indent, stringstream* out) co
   *out << " hash_tbl=";
   *out << string(indent * 2, ' ');
   *out << "HashTbl("
-       << " build_exprs=" << Expr::DebugString(build_expr_ctxs_)
-       << " probe_exprs=" << Expr::DebugString(probe_expr_ctxs_);
+       << " build_exprs=" << ExprContext::DebugString(build_expr_ctxs_)
+       << " probe_exprs=" << ExprContext::DebugString(probe_expr_ctxs_);
   *out << ")";
 }
 

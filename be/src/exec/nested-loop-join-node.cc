@@ -50,8 +50,10 @@ NestedLoopJoinNode::~NestedLoopJoinNode() {
 Status NestedLoopJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   RETURN_IF_ERROR(BlockingJoinNode::Init(tnode, state));
   DCHECK(tnode.__isset.nested_loop_join_node);
+  vector<Expr*> join_conjuncts;
   RETURN_IF_ERROR(Expr::CreateExprTrees(pool_, tnode.nested_loop_join_node.join_conjuncts,
-      &join_conjunct_ctxs_));
+      &join_conjuncts));
+  ExprContext::Create(pool_, join_conjuncts, &join_conjunct_ctxs_);
 
   DCHECK(tnode.nested_loop_join_node.join_op != TJoinOp::CROSS_JOIN ||
       join_conjunct_ctxs_.size() == 0) << "Join conjuncts in a cross join";
@@ -61,7 +63,7 @@ Status NestedLoopJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
 Status NestedLoopJoinNode::Open(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(BlockingJoinNode::Open(state));
-  RETURN_IF_ERROR(Expr::Open(join_conjunct_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(join_conjunct_ctxs_, state));
 
   // Check for errors and free local allocations before opening children.
   RETURN_IF_CANCELLED(state);
@@ -99,8 +101,8 @@ Status NestedLoopJoinNode::Prepare(RuntimeState* state) {
   // join_conjunct_ctxs_ are evaluated in the context of rows assembled from
   // all inner and outer tuples.
   RowDescriptor full_row_desc(child(0)->row_desc(), child(1)->row_desc());
-  RETURN_IF_ERROR(
-      Expr::Prepare(join_conjunct_ctxs_, state, full_row_desc, expr_mem_tracker()));
+  RETURN_IF_ERROR(ExprContext::Prepare(join_conjunct_ctxs_, state, full_row_desc,
+      expr_mem_tracker()));
 
   builder_.reset(new NljBuilder(child(1)->row_desc(), state));
   RETURN_IF_ERROR(builder_->Prepare(state, mem_tracker()));
@@ -138,7 +140,7 @@ Status NestedLoopJoinNode::Reset(RuntimeState* state) {
 
 void NestedLoopJoinNode::Close(RuntimeState* state) {
   if (is_closed()) return;
-  Expr::Close(join_conjunct_ctxs_, state);
+  ExprContext::Close(join_conjunct_ctxs_, state);
   if (builder_ != NULL) {
     builder_->Close(state);
     builder_.reset();

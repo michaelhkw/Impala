@@ -225,7 +225,7 @@ const string* KuduScanNode::GetNextScanToken() {
 }
 
 Status KuduScanNode::GetConjunctCtxs(vector<ExprContext*>* ctxs) {
-  return Expr::CloneIfNotExists(conjunct_ctxs_, runtime_state_, ctxs);
+  return ExprContext::CloneIfNotExists(conjunct_ctxs_, runtime_state_, ctxs);
 }
 
 void KuduScanNode::ThreadAvailableCb(ThreadResourceMgr::ResourcePool* pool) {

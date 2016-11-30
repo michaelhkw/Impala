@@ -62,7 +62,7 @@ SlotRef::SlotRef(const SlotDescriptor* desc, const ColumnType& type)
     // slot_/null_indicator_offset_ are set in Prepare()
 }
 
-  SlotRef::SlotRef(const ColumnType& type, int offset, const bool nullable /* = false */)
+SlotRef::SlotRef(const ColumnType& type, int offset, const bool nullable /* = false */)
   : Expr(type, true),
     tuple_idx_(0),
     slot_offset_(offset),
@@ -70,8 +70,7 @@ SlotRef::SlotRef(const SlotDescriptor* desc, const ColumnType& type)
     slot_id_(-1) {
 }
 
-Status SlotRef::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                        ExprContext* context) {
+Status SlotRef::Init(RuntimeState* state, const RowDescriptor& row_desc) {
   DCHECK_EQ(children_.size(), 0);
   if (slot_id_ == -1) return Status::OK();
 

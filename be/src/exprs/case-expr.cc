@@ -35,27 +35,21 @@ namespace impala {
 struct CaseExprState {
   // Space to store the values being compared in the interpreted path. This makes it
   // easier to pass around AnyVal subclasses. Allocated from the runtime state's object
-  // pool in Prepare().
+  // pool in OpenContext().
   AnyVal* case_val;
   AnyVal* when_val;
 };
 
-CaseExpr::CaseExpr(const TExprNode& node)
-  : Expr(node),
+CaseExpr::CaseExpr(const TExprNode& node, int fn_context_index)
+  : Expr(node, false, fn_context_index),
     has_case_expr_(node.case_expr.has_case_expr),
     has_else_expr_(node.case_expr.has_else_expr) {
+  DCHECK_GE(fn_context_index, 0);
 }
 
-Status CaseExpr::Prepare(RuntimeState* state, const RowDescriptor& desc,
-                         ExprContext* ctx) {
-  RETURN_IF_ERROR(Expr::Prepare(state, desc, ctx));
-  RegisterFunctionContext(ctx, state);
-  return Status::OK();
-}
-
-Status CaseExpr::Open(RuntimeState* state, ExprContext* ctx,
-                      FunctionContext::FunctionStateScope scope) {
-  RETURN_IF_ERROR(Expr::Open(state, ctx, scope));
+Status CaseExpr::OpenContext(RuntimeState* state, ExprContext* ctx,
+    FunctionContext::FunctionStateScope scope) {
+  RETURN_IF_ERROR(Expr::OpenContext(state, ctx, scope));
   FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
   CaseExprState* case_state = fn_ctx->Allocate<CaseExprState>();
   if (UNLIKELY(case_state == NULL)) {
@@ -74,14 +68,13 @@ Status CaseExpr::Open(RuntimeState* state, ExprContext* ctx,
   return Status::OK();
 }
 
-void CaseExpr::Close(RuntimeState* state, ExprContext* ctx,
-                     FunctionContext::FunctionStateScope scope) {
-  if (fn_context_index_ != -1) {
-    FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
-    void* case_state = fn_ctx->GetFunctionState(FunctionContext::THREAD_LOCAL);
-    fn_ctx->Free(reinterpret_cast<uint8_t*>(case_state));
-  }
-  Expr::Close(state, ctx, scope);
+void CaseExpr::CloseContext(RuntimeState* state, ExprContext* ctx,
+    FunctionContext::FunctionStateScope scope) {
+  DCHECK_GE(fn_context_index_, 0);
+  FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
+  void* case_state = fn_ctx->GetFunctionState(FunctionContext::THREAD_LOCAL);
+  fn_ctx->Free(reinterpret_cast<uint8_t*>(case_state));
+  Expr::CloseContext(state, ctx, scope);
 }
 
 string CaseExpr::DebugString() const {

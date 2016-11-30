@@ -128,13 +128,17 @@ Status AnalyticEvalNode::Init(const TPlanNode& tnode, RuntimeState* state) {
       << "UNBOUNDED FOLLOWING is only supported with UNBOUNDED PRECEDING.";
   if (analytic_node.__isset.partition_by_eq) {
     DCHECK(analytic_node.__isset.buffered_tuple_id);
+    Expr* partition_by_eq_expr;
     RETURN_IF_ERROR(Expr::CreateExprTree(pool_, analytic_node.partition_by_eq,
-          &partition_by_eq_expr_ctx_));
+        &partition_by_eq_expr));
+    partition_by_eq_expr_ctx_ = ExprContext::Create(pool_, partition_by_eq_expr);
   }
   if (analytic_node.__isset.order_by_eq) {
     DCHECK(analytic_node.__isset.buffered_tuple_id);
+    Expr* order_by_eq_expr;
     RETURN_IF_ERROR(Expr::CreateExprTree(pool_, analytic_node.order_by_eq,
-          &order_by_eq_expr_ctx_));
+        &order_by_eq_expr));
+    order_by_eq_expr_ctx_ = ExprContext::Create(pool_, order_by_eq_expr);
   }
   return Status::OK();
 }

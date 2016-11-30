@@ -36,8 +36,7 @@ class TupleIsNullPredicate: public Predicate {
 
   TupleIsNullPredicate(const TExprNode& node);
 
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
+  virtual Status Init(RuntimeState* state, const RowDescriptor& row_desc);
   virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
   virtual std::string DebugString() const;
 

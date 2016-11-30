@@ -38,25 +38,29 @@ class RowDescriptor;
 class TColumnValue;
 class TupleRow;
 
-/// An ExprContext contains the state for the execution of a tree of Exprs, in particular
-/// the FunctionContexts necessary for the expr tree. This allows for multi-threaded
-/// expression evaluation, as a given tree can be evaluated using multiple ExprContexts
-/// concurrently. A single ExprContext is not thread-safe.
+/// An ExprContext contains thread private states for the evaluation of an Expr Tree.
+/// It holds the evaluation result which allows multiple threads to evaluate the same
+/// expression on different rows concurrently using multiple ExprContexts. It also holds
+/// FunctionContexts needed by any sub-expression in the Expr tree. A single ExprContext
+/// is not thread-safe. Please see the class comment in expr.h for relationship with Expr
+/// and FunctionContext.
+///
+/// TODO: rename ExprContext to ExprEvaluator.
+
 class ExprContext {
  public:
-  ExprContext(Expr* root);
   ~ExprContext();
 
-  /// Prepare expr tree for evaluation.
-  /// Allocations from this context will be counted against 'tracker'.
+  /// Allocates all FunctionContexts for this ExprContext. Also initialize the expr tree
+  /// for evaluation. Allocations from this context will be counted against 'tracker'.
   /// If Prepare() is called, Close() must be called before destruction to release
   /// resources, regardless of whether Prepare() succeeded.
-  Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                 MemTracker* tracker);
+  Status Prepare(RuntimeState* state, const RowDescriptor& row_desc, MemTracker* tracker);
 
+  /// Initializes the FunctionContexts in the ExprContext on all nodes in the Expr tree.
   /// Must be called after calling Prepare(). Does not need to be called on clones.
   /// Idempotent (this allows exprs to be opened multiple times in subplans without
-  /// reinitializing function state).
+  /// reinitializing function states).
   Status Open(RuntimeState* state);
 
   /// Creates a copy of this ExprContext. Open() must be called first. The copy contains
@@ -69,9 +73,38 @@ class ExprContext {
   /// original.
   Status Clone(RuntimeState* state, ExprContext** new_context);
 
+  /// Clones each ExprContext for multiple expr trees. 'new_ctxs' must be non-NULL.
+  /// Idempotent: if '*new_ctxs' is empty, a clone of each context in 'ctxs' will be added
+  /// to it, and if non-empty, it is assumed CloneIfNotExists() was already called and the
+  /// call is a no-op. The new ExprContexts are created in state->obj_pool().
+  static Status CloneIfNotExists(const std::vector<ExprContext*>& ctxs,
+      RuntimeState* state, std::vector<ExprContext*>* new_ctxs);
+
   /// Closes all FunctionContexts. Must be called on every ExprContext, including clones.
   /// Has no effect if already closed.
   void Close(RuntimeState* state);
+
+  /// Returns a newly created ExprContext object for 'expr' and adds it to 'pool'.
+  /// Use this interface except for creating ExprContext on a stack.
+  static ExprContext* Create(ObjectPool* pool, Expr* expr);
+
+  /// Creates ExprContexts for all expressions in 'exprs' and returns them in
+  /// 'expr_ctxs'. All ExprContexts are stored in 'pool'.
+  static void Create(ObjectPool* pool, const std::vector<Expr*>& exprs,
+      std::vector<ExprContext*>* expr_ctxs);
+
+  /// Convenience function for preparing multiple ExprContexts.
+  /// Allocations from 'ctxs' will be counted against 'tracker'.
+  static Status Prepare(const std::vector<ExprContext*>& ctxs, RuntimeState* state,
+      const RowDescriptor& row_desc, MemTracker* tracker);
+
+  /// Convenience function for opening multiple ExprContexts.
+  static Status Open(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
+
+  /// Convenience function for closing multiple ExprContexts.
+  static void Close(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
+
+  static std::string DebugString(const std::vector<ExprContext*>& ctxs);
 
   /// Calls the appropriate Get*Val() function on this context's expr tree and stores the
   /// result in result_.
@@ -92,27 +125,31 @@ class ExprContext {
   /// TYPE_TIMESTAMP: binaryVal has the raw data, stringVal its string representation.
   void EvaluateWithoutRow(TColumnValue* col_val);
 
+  /// Returns an error status if FunctionContexts associated with this Expr tree
+  /// have any error. ['start', 'end') is the range inside the vector of FunctionContext
+  /// in this ExprContext object. The default value of -1 for 'end' means the end of the
+  /// vector of FunctionContext.
+  Status GetFnContextError(int start = 0, int end = -1);
+
   /// Convenience functions: print value into 'str' or 'stream'.  NULL turns into "NULL".
   void PrintValue(const TupleRow* row, std::string* str);
   void PrintValue(void* value, std::string* str);
   void PrintValue(void* value, std::stringstream* stream);
   void PrintValue(const TupleRow* row, std::stringstream* stream);
 
-  /// Creates a FunctionContext, and returns the index that's passed to fn_context() to
-  /// retrieve the created context. Exprs that need a FunctionContext should call this in
-  /// Prepare() and save the returned index. 'varargs_buffer_size', if specified, is the
-  /// size of the varargs buffer in the created FunctionContext (see udf-internal.h).
-  int Register(RuntimeState* state, const FunctionContext::TypeDesc& return_type,
-               const std::vector<FunctionContext::TypeDesc>& arg_types,
-               int varargs_buffer_size = 0);
-
-  /// Retrieves a registered FunctionContext. 'i' is the index returned by the call to
-  /// Register(). This should only be called by Exprs.
+  /// Retrieves a registered FunctionContext. 'i' is the 'fn_context_index_' of the
+  /// corresponding Expr in the Expr tree.
   FunctionContext* fn_context(int i) {
     DCHECK_GE(i, 0);
     DCHECK_LT(i, fn_contexts_.size());
     return fn_contexts_[i];
   }
+
+  /// Get the number of digits after the decimal that should be displayed for this value.
+  /// Returns -1 if no scale has been specified (currently the scale is only set for
+  /// doubles set by RoundUpTo). GetValue() must have already been called.
+  /// TODO: remove this (IMPALA-4720).
+  int output_scale() const { return output_scale_; }
 
   Expr* root() const { return root_; }
   bool opened() const { return opened_; }
@@ -180,9 +217,20 @@ class ExprContext {
   bool opened_;
   bool closed_;
 
+  ExprContext(Expr* root);
+
+  /// The number of digits after the decimal that should be displayed for this value.
+  /// -1 if no scale has been specified (currently the scale is only set for doubles
+  /// set by RoundUpTo).
+  int output_scale_;
+
   /// Calls the appropriate Get*Val() function on 'e' and stores the result in result_.
   /// This is used by Exprs to call GetValue() on a child expr, rather than root_.
   void* GetValue(Expr* e, const TupleRow* row);
+
+  /// Walks the expression tree 'expr' and fills in 'fn_contexts_' for all Expr nodes
+  /// which need FunctionContext.
+  void CreateFnContexts(RuntimeState* state, Expr* expr);
 };
 
 }

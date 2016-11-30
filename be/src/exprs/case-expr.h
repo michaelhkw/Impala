@@ -49,12 +49,10 @@ class CaseExpr: public Expr {
   friend class ConditionalFunctions;
   friend class DecimalOperators;
 
-  CaseExpr(const TExprNode& node);
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-      ExprContext* context);
-  virtual Status Open(RuntimeState* state, ExprContext* context,
+  CaseExpr(const TExprNode& node, int fn_context_index);
+  virtual Status OpenContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
-  virtual void Close(RuntimeState* state, ExprContext* context,
+  virtual void CloseContext(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
 
   virtual std::string DebugString() const;

@@ -40,16 +40,18 @@ PlanRootSink::PlanRootSink(const RowDescriptor& row_desc,
 
 Status PlanRootSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
   RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
+  vector<Expr*> output_exprs;
   RETURN_IF_ERROR(
-      Expr::CreateExprTrees(state->obj_pool(), thrift_output_exprs_, &output_expr_ctxs_));
+      Expr::CreateExprTrees(state->obj_pool(), thrift_output_exprs_, &output_exprs));
+  ExprContext::Create(state->obj_pool(), output_exprs, &output_expr_ctxs_);
   RETURN_IF_ERROR(
-      Expr::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
+      ExprContext::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
 
   return Status::OK();
 }
 
 Status PlanRootSink::Open(RuntimeState* state) {
-  RETURN_IF_ERROR(Expr::Open(output_expr_ctxs_, state));
+  RETURN_IF_ERROR(ExprContext::Open(output_expr_ctxs_, state));
   return Status::OK();
 }
 
@@ -139,7 +141,7 @@ void PlanRootSink::Close(RuntimeState* state) {
   // Wait for consumer to be done, in case sender tries to tear-down this sink while the
   // sender is still reading from it.
   while (!consumer_done_) sender_cv_.wait(l);
-  Expr::Close(output_expr_ctxs_, state);
+  ExprContext::Close(output_expr_ctxs_, state);
   DataSink::Close(state);
 }
 
@@ -168,7 +170,7 @@ void PlanRootSink::GetRowValue(
   DCHECK(result->size() >= output_expr_ctxs_.size());
   for (int i = 0; i < output_expr_ctxs_.size(); ++i) {
     (*result)[i] = output_expr_ctxs_[i]->GetValue(row);
-    (*scales)[i] = output_expr_ctxs_[i]->root()->output_scale();
+    (*scales)[i] = output_expr_ctxs_[i]->output_scale();
   }
 }
 }

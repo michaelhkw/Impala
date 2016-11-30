@@ -108,7 +108,7 @@ Status HdfsScanner::Open(ScannerContext* context) {
   // Clone the scan node's conjuncts map. The cloned contexts must be closed by the
   // caller.
   for (const auto& entry: scan_node_->conjuncts_map()) {
-    RETURN_IF_ERROR(Expr::CloneIfNotExists(entry.second,
+    RETURN_IF_ERROR(ExprContext::CloneIfNotExists(entry.second,
         scan_node_->runtime_state(), &scanner_conjuncts_map_[entry.first]));
   }
   DCHECK(scanner_conjuncts_map_.find(scan_node_->tuple_desc()->id()) !=
@@ -127,7 +127,9 @@ Status HdfsScanner::Open(ScannerContext* context) {
 
 void HdfsScanner::Close(RowBatch* row_batch) {
   if (decompressor_.get() != NULL) decompressor_->Close();
-  for (const auto& entry: scanner_conjuncts_map_) Expr::Close(entry.second, state_);
+  for (const auto& entry: scanner_conjuncts_map_) {
+    ExprContext::Close(entry.second, state_);
+  }
   obj_pool_.Clear();
   stream_ = NULL;
   context_->ClearStreams();
