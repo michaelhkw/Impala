@@ -331,7 +331,12 @@ public class FunctionCallExpr extends Expr {
 
     int digitsBefore = childType.decimalPrecision() - childType.decimalScale();
     int digitsAfter = childType.decimalScale();
-    if (fnName_.getFunction().equalsIgnoreCase("ceil") ||
+    if (fnName_.getFunction().equalsIgnoreCase("avg") &&
+        analyzer.getQueryOptions().isDecimal_v2()) {
+      int resultScale = Math.max(ScalarType.MIN_ADJUSTED_SCALE, digitsAfter);
+      int resultPrecision = digitsBefore + resultScale;
+      return ScalarType.createAdjustedDecimalType(resultPrecision, resultScale);
+    } else if (fnName_.getFunction().equalsIgnoreCase("ceil") ||
                fnName_.getFunction().equalsIgnoreCase("ceiling") ||
                fnName_.getFunction().equals("floor") ||
                fnName_.getFunction().equals("dfloor")) {
