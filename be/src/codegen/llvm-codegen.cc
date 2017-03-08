@@ -109,7 +109,8 @@ FnRefsMap LlvmCodeGen::fn_refs_map_;
 
 [[noreturn]] static void LlvmCodegenHandleError(
     void* user_data, const std::string& reason, bool gen_crash_diag) {
-  LOG(FATAL) << "LLVM hit fatal error: " << reason.c_str();
+  LOG(ERROR) << "LlvmCodeGen hit fatal error: " << reason;
+  throw reason;
 }
 
 bool LlvmCodeGen::IsDefinedInImpalad(const string& fn_name) {
@@ -223,8 +224,7 @@ LlvmCodeGen::LlvmCodeGen(RuntimeState* state, ObjectPool* pool,
     is_compiled_(false),
     context_(new llvm::LLVMContext()),
     module_(NULL),
-    memory_manager_(NULL),
-    loaded_functions_(IRFunction::FN_END, NULL) {
+    memory_manager_(NULL) {
   DCHECK(llvm_initialized_) << "Must call LlvmCodeGen::InitializeLlvm first.";
 
   load_module_timer_ = ADD_TIMER(&profile_, "LoadTime");
@@ -638,7 +638,9 @@ Status LlvmCodeGen::MaterializeFunctionHelper(Function *fn) {
 
   // Materialized functions are marked as not materializable by LLVM.
   DCHECK(!fn->isMaterializable());
-  const unordered_set<string>& callees = fn_refs_map_[fn->getName().str()];
+  const string& fn_name = fn->getName();
+  materialized_functions_.push_back(fn_name);
+  const unordered_set<string>& callees = fn_refs_map_[fn_name];
   for (const string& callee: callees) {
     Function* callee_fn = module_->getFunction(callee);
     DCHECK(callee_fn != nullptr);
@@ -666,19 +668,15 @@ Function* LlvmCodeGen::GetFunction(const string& symbol, bool clone) {
 }
 
 Function* LlvmCodeGen::GetFunction(IRFunction::Type ir_type, bool clone) {
-  Function* fn = loaded_functions_[ir_type];
+  DCHECK(FN_MAPPINGS[ir_type].fn == ir_type);
+  const string& fn_name = FN_MAPPINGS[ir_type].fn_name;
+  Function* fn = module_->getFunction(fn_name);
   if (fn == NULL) {
-    DCHECK(FN_MAPPINGS[ir_type].fn == ir_type);
-    const string& fn_name = FN_MAPPINGS[ir_type].fn_name;
-    fn = module_->getFunction(fn_name);
-    if (fn == NULL) {
-      LOG(ERROR) << "Unable to locate function " << fn_name;
-      return NULL;
-    }
-    // Mixing "NoInline" with "AlwaysInline" will lead to compilation failure.
-    if (!fn->hasFnAttribute(Attribute::NoInline)) fn->addFnAttr(Attribute::AlwaysInline);
-    loaded_functions_[ir_type] = fn;
+    LOG(ERROR) << "Unable to locate function " << fn_name;
+    return NULL;
   }
+  // Mixing "NoInline" with "AlwaysInline" will lead to compilation failure.
+  if (!fn->hasFnAttribute(Attribute::NoInline)) fn->addFnAttr(Attribute::AlwaysInline);
   Status status = MaterializeFunction(fn);
   if (UNLIKELY(!status.ok())) return NULL;
   if (clone) return CloneFunction(fn);
@@ -1025,6 +1023,8 @@ Status LlvmCodeGen::FinalizeLazyMaterialization() {
   for (Function& fn: module_->functions()) {
     if (fn.isMaterializable()) {
       DCHECK(!module_->isMaterialized());
+      DCHECK(std::find(materialized_functions_.begin(), materialized_functions_.end(),
+          fn.getName()) == materialized_functions_.end());
       // Unmaterialized functions can still have their declarations around. LLVM asserts
       // these unmaterialized functions' linkage types are external / external weak.
       fn.setLinkage(Function::ExternalLinkage);
@@ -1069,26 +1069,38 @@ Status LlvmCodeGen::FinalizeModule() {
     return Status::OK();
   }
 
-  RETURN_IF_ERROR(FinalizeLazyMaterialization());
-  if (optimizations_enabled_ && !FLAGS_disable_optimization_passes) {
-    RETURN_IF_ERROR(OptimizeModule());
-  }
-
-  if (FLAGS_opt_module_dir.size() != 0) {
-    string path = FLAGS_opt_module_dir + "/" + id_ + "_opt.ll";
-    fstream f(path.c_str(), fstream::out | fstream::trunc);
-    if (f.fail()) {
-      LOG(ERROR) << "Could not save IR to: " << path;
-    } else {
-      f << GetIR(true);
-      f.close();
+  try {
+    RETURN_IF_ERROR(FinalizeLazyMaterialization());
+    if (optimizations_enabled_ && !FLAGS_disable_optimization_passes) {
+      RETURN_IF_ERROR(OptimizeModule());
     }
-  }
 
-  {
-    SCOPED_TIMER(compile_timer_);
-    // Finalize module, which compiles all functions.
-    execution_engine_->finalizeObject();
+    if (FLAGS_opt_module_dir.size() != 0) {
+      string path = FLAGS_opt_module_dir + "/" + id_ + "_opt.ll";
+      fstream f(path.c_str(), fstream::out | fstream::trunc);
+      if (f.fail()) {
+        LOG(ERROR) << "Could not save IR to: " << path;
+      } else {
+        f << GetIR(true);
+        f.close();
+      }
+    }
+
+    {
+      SCOPED_TIMER(compile_timer_);
+      // Finalize module, which compiles all functions.
+      execution_engine_->finalizeObject();
+    }
+  } catch (std::string& reason) {
+    module_->dump();
+    VLOG_QUERY << "---------- Dumping materialized functions ----------\n";
+    for (auto& fn_name : materialized_functions_) {
+      VLOG_QUERY << "fn: " << fn_name;
+      for (auto& callee : fn_refs_map_[fn_name]) {
+        VLOG_QUERY << "  -> " << callee;
+      }
+    }
+    return Status(Substitute("Codegen failed due to compilation error: $0", reason));
   }
 
   // Get pointers to all codegen'd functions
@@ -1195,7 +1207,7 @@ Status LlvmCodeGen::OptimizeModule() {
 
 void LlvmCodeGen::DestroyModule() {
   // Clear all references to LLVM objects owned by the module.
-  loaded_functions_.clear();
+  materialized_functions_.clear();
   codegend_functions_.clear();
   registered_exprs_map_.clear();
   registered_exprs_.clear();

@@ -720,8 +720,8 @@ class LlvmCodeGen {
   /// The memory manager used by 'execution_engine_'. Owned by 'execution_engine_'.
   ImpalaMCJITMemoryManager* memory_manager_;
 
-  /// Functions parsed from pre-compiled module.  Indexed by ImpalaIR::Function enum
-  std::vector<llvm::Function*> loaded_functions_;
+  /// Names of functions materialized from pre-compiled module.
+  std::vector<std::string> materialized_functions_;
 
   /// Stores functions codegen'd by impala.  This does not contain cross compiled
   /// functions, only function that were generated at runtime.  Does not overlap
