@@ -169,7 +169,7 @@ class Tuple {
   /// differentiate these cases when we replace the function calls during codegen.
   static Status CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_vals,
       const TupleDescriptor& desc, const vector<ExprContext*>& materialize_expr_ctxs,
-      MemPool* pool, llvm::Function** fn);
+      bool use_mem_pool, llvm::Function** fn);
 
   /// Turn null indicator bit on. For non-nullable slots, the mask will be 0 and
   /// this is a no-op (but we don't have to branch to check is slots are nullable).

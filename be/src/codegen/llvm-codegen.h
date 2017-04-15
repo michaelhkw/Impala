@@ -496,8 +496,8 @@ class LlvmCodeGen {
       const TupleDescriptor& tuple_desc);
 
   /// Codegen to call pool->Allocate(size).
-  llvm::Value* CodegenAllocate(LlvmBuilder* builder, MemPool* pool, llvm::Value* size,
-      const char* name = "");
+  llvm::Value* CodegenAllocate(LlvmBuilder* builder, llvm::Value* pool_val,
+      llvm::Value* size_val, const char* name = "");
 
   /// Codegens IR to load array[idx] and returns the loaded value. 'array' should be a
   /// C-style array (e.g. i32*) or an IR array (e.g. [10 x i32]). This function does not

@@ -308,7 +308,7 @@ void Tuple::MaterializeExprs(
 // }
 Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_vals,
     const TupleDescriptor& desc, const vector<ExprContext*>& materialize_expr_ctxs,
-    MemPool* pool, Function** fn) {
+    bool use_mem_pool, Function** fn) {
   DCHECK(!collect_string_vals) << "CodegenMaterializeExprs: collect_string_vals NYI";
   SCOPED_TIMER(codegen->codegen_timer());
   LLVMContext& context = codegen->context();
@@ -335,7 +335,7 @@ Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_
   PointerType* desc_type = codegen->GetPtrType(TupleDescriptor::LLVM_CLASS_NAME);
   PointerType* expr_ctxs_type =
       codegen->GetPtrType(codegen->GetPtrType(ExprContext::LLVM_CLASS_NAME));
-  PointerType* pool_type = codegen->GetPtrType(MemPool::LLVM_CLASS_NAME);
+  PointerType* mem_pool_type = codegen->GetPtrType(MemPool::LLVM_CLASS_NAME);
   PointerType* string_values_type =
       codegen->GetPtrType(codegen->GetPtrType(StringValue::LLVM_CLASS_NAME));
   PointerType* int_ptr_type = codegen->GetPtrType(TYPE_INT);
@@ -344,7 +344,7 @@ Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_
   prototype.AddArgument("row", row_type);
   prototype.AddArgument("desc", desc_type);
   prototype.AddArgument("materialize_expr_ctxs", expr_ctxs_type);
-  prototype.AddArgument("pool", pool_type);
+  prototype.AddArgument("mem_pool", mem_pool_type);
   prototype.AddArgument("non_null_string_values", string_values_type);
   prototype.AddArgument("total_string_lengths", int_ptr_type);
   prototype.AddArgument("num_non_null_string_values", int_ptr_type);
@@ -356,7 +356,7 @@ Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_
   Value* row_arg = args[1];
   // Value* desc_arg = args[2]; // unused
   Value* expr_ctxs_arg = args[3];
-  // Value* pool_arg = args[4]; // unused
+  Value* pool_arg = args[4];
   // Value* non_null_string_values_arg = args[5]; // unused
   // Value* total_string_lengths_arg = args[6]; // unused
   // Value* num_non_null_string_values_arg = args[7]; // unused
@@ -386,7 +386,7 @@ Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_string_
         materialize_expr_fns[i], expr_args, "src");
 
     // Write expr result 'src' to slot
-    src.WriteToSlot(*slot_desc, tuple, pool);
+    src.WriteToSlot(*slot_desc, tuple, use_mem_pool ? pool_arg : nullptr);
   }
   builder.CreateRetVoid();
   // TODO: if pool != NULL, OptimizeFunctionWithExprs() is inlining the Allocate()
