@@ -315,7 +315,7 @@ bool MemTracker::GcMemory(int64_t max_consumption) {
 }
 
 void MemTracker::GcTcmalloc() {
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   released_memory_since_gc_.Store(0);
   MallocExtension::instance()->ReleaseFreeMemory();
 #else

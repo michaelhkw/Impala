@@ -112,6 +112,9 @@ do
     -asan)
       BUILD_ASAN=1
       ;;
+    -tsan)
+      BUILD_TSAN=1
+      ;;
     -tidy)
       BUILD_TIDY=1
       ;;
@@ -261,6 +264,9 @@ if [[ ${BUILD_ASAN} -eq 1 ]]; then
     exit 1
   fi
   CMAKE_BUILD_TYPE=ADDRESS_SANITIZER
+fi
+if [[ ${BUILD_TSAN} -eq 1 ]]; then
+  CMAKE_BUILD_TYPE=THREAD_SANITIZER
 fi
 if [[ ${BUILD_TIDY} -eq 1 ]]; then
   CMAKE_BUILD_TYPE=TIDY

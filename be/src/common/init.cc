@@ -114,7 +114,7 @@ static scoped_ptr<impala::Thread> pause_monitor;
     // on teardown.
     if (impala::TestInfo::is_test()) continue;
 
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
     // Required to ensure memory gets released back to the OS, even if tcmalloc doesn't do
     // it for us. This is because tcmalloc releases memory based on the
     // TCMALLOC_RELEASE_RATE property, which is not actually a rate but a divisor based
@@ -197,7 +197,9 @@ void impala::InitCommonRuntime(int argc, char** argv, bool init_jvm,
   impala::InitGoogleLoggingSafe(argv[0]);
   // Breakpad needs flags and logging to initialize.
   ABORT_IF_ERROR(RegisterMinidump(argv[0]));
+#ifndef THREAD_SANITIZER
   AtomicOps_x86CPUFeaturesInit();
+#endif
   impala::InitThreading();
   impala::TimestampParser::Init();
   impala::SeedOpenSSLRNG();
@@ -241,7 +243,7 @@ void impala::InitCommonRuntime(int argc, char** argv, bool init_jvm,
 
   if (impala::KuduIsAvailable()) impala::InitKuduLogging();
 
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   // tcmalloc and address sanitizer can not be used together
   if (FLAGS_enable_process_lifetime_heap_profiling) {
     HeapProfilerStart(FLAGS_heap_profile_dir.c_str());

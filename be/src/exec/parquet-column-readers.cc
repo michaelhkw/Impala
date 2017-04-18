@@ -27,6 +27,7 @@
 #include "exec/parquet-metadata-utils.h"
 #include "exec/parquet-scratch-tuple-batch.h"
 #include "exec/read-write-util.h"
+#include "exec/scanner-context.inline.h"
 #include "gutil/bits.h"
 #include "rpc/thrift-util.h"
 #include "runtime/collection-value-builder.h"

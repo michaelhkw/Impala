@@ -148,6 +148,7 @@ then
     if [[ ! -z $IMPALA_TOOLCHAIN ]]; then
 
       if [[ ("$TARGET_BUILD_TYPE" == "ADDRESS_SANITIZER") \
+                || ("$TARGET_BUILD_TYPE" == "THREAD_SANITIZER") \
                 || ("$TARGET_BUILD_TYPE" == "TIDY") \
                 || ("$TARGET_BUILD_TYPE" == "UBSAN") ]]
       then

@@ -112,7 +112,7 @@ void QueryExecMgr::ExecFInstance(FragmentInstanceState* fis) {
   ImpaladMetrics::IMPALA_SERVER_NUM_FRAGMENTS_IN_FLIGHT->Increment(-1L);
   VLOG_QUERY << "Instance completed. instance_id=" << PrintId(fis->instance_id());
 
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   // tcmalloc and address sanitizer can not be used together
   if (FLAGS_log_mem_usage_interval > 0) {
     uint64_t num_complete = ImpaladMetrics::IMPALA_SERVER_NUM_FRAGMENTS->value();

@@ -194,7 +194,7 @@ TEST_F(MetricsTest, StatsMetricsSingle) {
 }
 
 TEST_F(MetricsTest, MemMetric) {
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   MetricGroup metrics("MemMetrics");
   RegisterMemoryMetrics(&metrics, false);
   // Smoke test to confirm that tcmalloc metrics are returning reasonable values.

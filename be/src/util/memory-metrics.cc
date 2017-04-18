@@ -40,7 +40,7 @@ TcmallocMetric* TcmallocMetric::CreateAndRegister(MetricGroup* metrics, const st
 }
 
 Status impala::RegisterMemoryMetrics(MetricGroup* metrics, bool register_jvm_metrics) {
-#ifndef ADDRESS_SANITIZER
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   TcmallocMetric::BYTES_IN_USE = TcmallocMetric::CreateAndRegister(metrics,
       "tcmalloc.bytes-in-use", "generic.current_allocated_bytes");
 
