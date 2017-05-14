@@ -319,6 +319,9 @@ error_codes = (
   ("KUDU_TIMESTAMP_OUT_OF_RANGE", 103,
    "Kudu table '$0' column '$1' contains an out of range timestamp. "
    "The valid date range is 1400-01-01..9999-12-31."),
+
+  ("IR_VERIFY_FAILED", 104,
+   "Failed to verify generated IR function $0, see log for more details."),
 )
 
 import sys
