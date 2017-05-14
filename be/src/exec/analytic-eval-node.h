@@ -19,15 +19,16 @@
 #define IMPALA_EXEC_ANALYTIC_EVAL_NODE_H
 
 #include "exec/exec-node.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
 #include "runtime/buffered-block-mgr.h"
 #include "runtime/buffered-tuple-stream.h"
 #include "runtime/tuple.h"
 
 namespace impala {
 
+class AggFn;
 class AggFnEvaluator;
+class ScalarExpr;
+class ScalarExprEvaluator;
 
 /// Evaluates analytic functions with a single pass over input rows. It is assumed
 /// that the input has already been sorted on all of the partition exprs and then the
@@ -175,9 +176,10 @@ class AnalyticEvalNode : public ExecNode {
   /// This is necessary to produce the default value (set by Init()).
   void ResetLeadFnSlots();
 
-  /// Evaluates the predicate pred_ctx over child_tuple_cmp_row_, which is a TupleRow*
-  /// containing the previous row and the current row set during ProcessChildBatch().
-  bool PrevRowCompare(ExprContext* pred_ctx);
+  /// Evaluates the predicate pred_evaluator over child_tuple_cmp_row_, which is
+  /// a TupleRow* containing the previous row and the current row set during
+  /// ProcessChildBatch().
+  bool PrevRowCompare(ScalarExprEvaluator* pred_evaluator);
 
   /// Debug string containing current state. If 'detailed', per-row state is included.
   std::string DebugStateString(bool detailed) const;
@@ -203,13 +205,15 @@ class AnalyticEvalNode : public ExecNode {
   /// order_by_exprs are empty.
   TupleDescriptor* buffered_tuple_desc_;
 
-  /// Expr context for a predicate that checks if child tuple '<' buffered tuple for
-  /// partitioning exprs.
-  ExprContext* partition_by_eq_expr_ctx_;
+  /// A predicate that checks if child tuple '<' buffered tuple for partitioning exprs
+  /// and its evaluator.
+  ScalarExpr* partition_by_eq_expr_;
+  ScalarExprEvaluator* partition_by_eq_expr_evaluator_;
 
-  /// Expr context for a predicate that checks if child tuple '<' buffered tuple for
-  /// order by exprs.
-  ExprContext* order_by_eq_expr_ctx_;
+  /// A predicate that checks if child tuple '<' buffered tuple for order by exprs and
+  /// its evaluator.
+  ScalarExpr* order_by_eq_expr_;
+  ScalarExprEvaluator* order_by_eq_expr_evaluator_;
 
   /// The scope over which analytic functions are evaluated.
   /// TODO: Consider adding additional state to capture whether different kinds of window
@@ -222,8 +226,9 @@ class AnalyticEvalNode : public ExecNode {
   int64_t rows_start_offset_;
   int64_t rows_end_offset_;
 
-  /// Analytic function evaluators.
-  std::vector<AggFnEvaluator*> evaluators_;
+  /// Analytic functions and their evaluators.
+  std::vector<AggFn*> analytic_fns_;
+  std::vector<AggFnEvaluator*> analytic_fn_evaluators_;
 
   /// Indicates if each evaluator is the lead() fn. Used by ResetLeadFnSlots() to
   /// determine which slots need to be reset.
@@ -233,10 +238,6 @@ class AnalyticEvalNode : public ExecNode {
   /// partitions determined by the offset. Set in Open() by inspecting the agg fns.
   bool has_first_val_null_offset_;
   long first_val_null_offset_;
-
-  /// FunctionContext for each analytic function. String data returned by the analytic
-  /// functions is allocated via these contexts.
-  std::vector<impala_udf::FunctionContext*> fn_ctxs_;
 
   /// Mem pool backing allocations from fn_ctxs_. This pool must not be Reset() because
   /// the memory is managed by the FreePools of the function contexts which do their own
@@ -259,7 +260,7 @@ class AnalyticEvalNode : public ExecNode {
   /// BEGIN: Members that must be Reset()
 
   /// TupleRow* composed of the first child tuple and the buffered tuple, used by
-  /// partition_by_eq_expr_ctx_ and order_by_eq_expr_ctx_. Set in Open() if
+  /// partition_by_eq_expr_evaluator_ and order_by_eq_expr_evaluator_. Set in Open() if
   /// buffered_tuple_desc_ is not NULL, allocated from mem_pool_.
   TupleRow* child_tuple_cmp_row_;
 

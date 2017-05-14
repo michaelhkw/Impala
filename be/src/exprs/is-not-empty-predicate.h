@@ -22,6 +22,7 @@
 
 namespace impala {
 
+class ScalarExprEvaluator;
 class TExprNode;
 
 /// Predicate that checks whether a collection is empty or not.
@@ -29,16 +30,16 @@ class TExprNode;
 /// interface supports CollectionVals.
 class IsNotEmptyPredicate: public Predicate {
  public:
-  virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                         ExprContext* ctx);
   virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
-  virtual BooleanVal GetBooleanVal(ExprContext* context, const TupleRow* row);
+  virtual BooleanVal GetBooleanVal(ScalarExprEvaluator*, const TupleRow*) const;
   virtual std::string DebugString() const;
 
  protected:
-  friend class Expr;
+  friend class ScalarExpr;
 
+  virtual Status Init(const RowDescriptor& row_desc, RuntimeState* state) override;
   IsNotEmptyPredicate(const TExprNode& node);
+
 };
 
 }

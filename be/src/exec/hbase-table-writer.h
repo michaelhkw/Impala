@@ -45,7 +45,7 @@ class RowBatch;
 class HBaseTableWriter {
  public:
   HBaseTableWriter(HBaseTableDescriptor* table_desc,
-                   const std::vector<ExprContext*>& output_expr_ctxs,
+                   std::vector<ScalarExprEvaluator*>& output_expr_evaluators,
                    RuntimeProfile* profile);
   Status AppendRows(RowBatch* batch);
 
@@ -89,11 +89,12 @@ class HBaseTableWriter {
   /// up using close before the table can be discarded.
   boost::scoped_ptr<HBaseTable> table_;
 
-  /// The expressions that are run to create tuples to be written to hbase.
-  const std::vector<ExprContext*> output_expr_ctxs_;
-
-  /// output_exprs_byte_sizes_[i] is the byte size of output_expr_ctxs_[i]->root()'s type.
+  /// Contains the byte size of output_expr_evaluators_[i]->root()'s type.
   std::vector<int> output_exprs_byte_sizes_;
+
+  /// Reference to the evaluators of expressions which generate the output value.
+  /// The evaluators are owned by sink which owns this table writer.
+  const std::vector<ScalarExprEvaluator*>& output_expr_evaluators_;
 
   /// jni ArrayList<Put>
   jobject put_list_;
