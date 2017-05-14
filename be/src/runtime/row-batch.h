@@ -339,7 +339,7 @@ class RowBatch {
   /// have been exceeded. 'state' is used to log the error.
   /// On success, sets 'buffer_size' to the size in bytes and 'buffer' to the buffer.
   Status ResizeAndAllocateTupleBuffer(RuntimeState* state, int64_t* buffer_size,
-       uint8_t** buffer);
+      uint8_t** buffer);
 
   /// Helper function to log the batch's rows if VLOG_ROW is enabled. 'context' is a
   /// string to prepend to the log message.

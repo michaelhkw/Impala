@@ -24,8 +24,8 @@
 #include <boost/scoped_ptr.hpp>
 #include <ostream>
 
-#include "common/status.h"
 #include "common/global-types.h"
+#include "common/status.h"
 #include "runtime/types.h"
 
 #include "gen-cpp/Descriptors_types.h"  // for TTupleId
@@ -40,13 +40,12 @@ namespace llvm {
 
 namespace impala {
 
-class Expr;
-class ExprContext;
 class LlvmBuilder;
 class LlvmCodeGen;
 class ObjectPool;
 class RuntimeState;
-class MemTracker;
+class ScalarExpr;
+class ScalarExprEvaluator;
 class TDescriptorTable;
 class TSlotDescriptor;
 class TTable;
@@ -191,7 +190,7 @@ class SlotDescriptor {
   SlotDescriptor(const TSlotDescriptor& tdesc, const TupleDescriptor* parent,
       const TupleDescriptor* collection_item_descriptor);
 
-  /// Generate LLVM code at the insert position of 'builder' to get the i8 value of the
+  /// Generate LLVM code at the insert position of 'builder' to get the i8 value of
   /// the byte containing 'null_indicator_offset' in 'tuple'. If 'null_byte_ptr' is
   /// non-NULL, sets that to a pointer to the null byte.
   static llvm::Value* CodegenGetNullByte(LlvmCodeGen* codegen, LlvmBuilder* builder,
@@ -261,14 +260,16 @@ class HdfsPartitionDescriptor {
   int64_t id() const { return id_; }
   std::string DebugString() const;
 
-  /// It is safe to evaluate the returned expr contexts concurrently from multiple
+  /// It is safe to call the returned expr evaluators concurrently from multiple
   /// threads because all exprs are literals, after the descriptor table has been
   /// opened.
-  const std::vector<ExprContext*>& partition_key_value_ctxs() const {
-    return partition_key_value_ctxs_;
+  const std::vector<ScalarExprEvaluator*>& partition_key_value_evaluators() const {
+    return partition_key_value_evaluators_;
   }
 
  private:
+  friend class DescriptorTbl;
+
   char line_delim_;
   char field_delim_;
   char collection_delim_;
@@ -284,7 +285,12 @@ class HdfsPartitionDescriptor {
   /// The Prepare()/Open()/Close() cycle is controlled by the containing descriptor table
   /// because the same partition descriptor may be used by multiple exec nodes with
   /// different lifetimes.
-  std::vector<ExprContext*> partition_key_value_ctxs_;
+  const std::vector<TExpr>& thrift_partition_key_exprs_;
+
+  /// This evaluator is safe to be shared by all fragment instances as all expressions
+  /// are Literals.
+  /// TODO: replace this with vector<Literal> instead.
+  std::vector<ScalarExprEvaluator*> partition_key_value_evaluators_;
 
   /// The format (e.g. text, sequence file etc.) of data in the files in this partition
   THdfsFileFormat::type file_format_;
@@ -461,13 +467,9 @@ class TupleDescriptor {
 class DescriptorTbl {
  public:
   /// Creates a descriptor tbl within 'pool' from thrift_tbl and returns it via 'tbl'.
-  /// If mem_tracker_ != nullptr, also opens partition exprs for hdfs tables (and does
-  /// memory allocation against that tracker).
   /// Returns OK on success, otherwise error (in which case 'tbl' will be unset).
-  /// TODO: when cleaning up ExprCtx, remove the need to pass in a memtracker for literal
-  /// exprs that don't require additional memory at runtime.
   static Status Create(ObjectPool* pool, const TDescriptorTable& thrift_tbl,
-      MemTracker* mem_tracker, DescriptorTbl** tbl);
+      DescriptorTbl** tbl) WARN_UNUSED_RESULT;
 
   /// Free memory allocated in Create().
   void ReleaseResources();
@@ -491,6 +493,9 @@ class DescriptorTbl {
   SlotDescriptorMap slot_desc_map_;
 
   DescriptorTbl(): tbl_desc_map_(), tuple_desc_map_(), slot_desc_map_() {}
+
+  static Status CreatePartKeyExprs(ObjectPool* pool, const HdfsTableDescriptor* hdfs_tbl)
+      WARN_UNUSED_RESULT;
 };
 
 /// Records positions of tuples within row produced by ExecNode.

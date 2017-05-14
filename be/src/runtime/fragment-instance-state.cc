@@ -184,9 +184,8 @@ Status FragmentInstanceState::Prepare() {
 
   // prepare sink_
   DCHECK(fragment_ctx_.fragment.__isset.output_sink);
-  RETURN_IF_ERROR(
-      DataSink::Create(
-          obj_pool(), fragment_ctx_, instance_ctx_, exec_tree_->row_desc(), &sink_));
+  RETURN_IF_ERROR(DataSink::Create(obj_pool(), runtime_state_, fragment_ctx_,
+      instance_ctx_, exec_tree_->row_desc(), &sink_));
   RETURN_IF_ERROR(sink_->Prepare(runtime_state_, runtime_state_->instance_mem_tracker()));
   RuntimeProfile* sink_profile = sink_->profile();
   if (sink_profile != nullptr) profile()->AddChild(sink_profile);

@@ -43,10 +43,10 @@ class TupleRow;
 class HdfsTextTableWriter : public HdfsTableWriter {
  public:
   HdfsTextTableWriter(HdfsTableSink* parent,
-                      RuntimeState* state, OutputPartition* output,
-                      const HdfsPartitionDescriptor* partition,
-                      const HdfsTableDescriptor* table_desc,
-                      const std::vector<ExprContext*>& output_expr_ctxs);
+      RuntimeState* state, OutputPartition* output,
+      const HdfsPartitionDescriptor* partition,
+      const HdfsTableDescriptor* table_desc,
+      const std::vector<ScalarExprEvaluator*>& evaluators);
 
   ~HdfsTextTableWriter() { }
 
