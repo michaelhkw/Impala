@@ -104,6 +104,7 @@ namespace impala {
 bool LlvmCodeGen::llvm_initialized_ = false;
 string LlvmCodeGen::cpu_name_;
 vector<string> LlvmCodeGen::cpu_attrs_;
+string LlvmCodeGen::target_features_attr_;
 CodegenCallGraph LlvmCodeGen::shared_call_graph_;
 
 [[noreturn]] static void LlvmCodegenHandleError(
@@ -134,8 +135,8 @@ Status LlvmCodeGen::InitializeLlvm(bool load_backend) {
   cpu_name_ = llvm::sys::getHostCPUName().str();
   LOG(INFO) << "CPU class for runtime code generation: " << cpu_name_;
   GetHostCPUAttrs(&cpu_attrs_);
-  LOG(INFO) << "CPU flags for runtime code generation: "
-            << boost::algorithm::join(cpu_attrs_, ",");
+  target_features_attr_ = boost::algorithm::join(cpu_attrs_, ",");
+  LOG(INFO) << "CPU flags for runtime code generation: " << target_features_attr_;
 
   // Write an empty map file for perf to find.
   if (FLAGS_perf_map) CodegenSymbolEmitter::WritePerfMap();
@@ -150,7 +151,7 @@ Status LlvmCodeGen::InitializeLlvm(bool load_backend) {
   // Validate the module by verifying that functions for all IRFunction::Type
   // can be found.
   for (int i = IRFunction::FN_START; i < IRFunction::FN_END; ++i) {
-    DCHECK(FN_MAPPINGS[i].fn == i);
+    DCHECK_EQ(FN_MAPPINGS[i].fn, i);
     const string& fn_name = FN_MAPPINGS[i].fn_name;
     if (init_codegen->module_->getFunction(fn_name) == nullptr) {
       return Status(Substitute("Failed to find function $0", fn_name));
@@ -589,6 +590,7 @@ Status LlvmCodeGen::MaterializeFunctionHelper(Function *fn) {
 
   // Materialized functions are marked as not materializable by LLVM.
   DCHECK(!fn->isMaterializable());
+  SetCPUAndInlineAttrs(fn);
   const unordered_set<string>* callees = shared_call_graph_.GetCallees(fn->getName());
   if (callees != nullptr) {
     for (const string& callee : *callees) {
@@ -628,8 +630,6 @@ Function* LlvmCodeGen::GetFunction(IRFunction::Type ir_type, bool clone) {
       LOG(ERROR) << "Unable to locate function " << fn_name;
       return NULL;
     }
-    // Mixing "NoInline" with "AlwaysInline" will lead to compilation failure.
-    if (!fn->hasFnAttribute(Attribute::NoInline)) fn->addFnAttr(Attribute::AlwaysInline);
     loaded_functions_[ir_type] = fn;
   }
   Status status = MaterializeFunction(fn);
@@ -692,7 +692,19 @@ bool LlvmCodeGen::VerifyFunction(Function* fn) {
 
 void LlvmCodeGen::SetNoInline(llvm::Function* function) const {
   function->removeFnAttr(llvm::Attribute::AlwaysInline);
+  function->removeFnAttr(llvm::Attribute::InlineHint);
   function->addFnAttr(llvm::Attribute::NoInline);
+}
+
+void LlvmCodeGen::SetCPUAndInlineAttrs(llvm::Function* function) const {
+  // Set the cross-compiled functions' "target-cpu" and "target-features" to
+  // match the host's CPU's features.
+  function->addFnAttr("target-cpu", cpu_name_);
+  function->addFnAttr("target-features", target_features_attr_);
+  // If there is no "noinline" attribute, add an inline hint to the function.
+  if (!function->hasFnAttribute(llvm::Attribute::NoInline)) {
+    function->addFnAttr(Attribute::InlineHint);
+  }
 }
 
 LlvmCodeGen::FnPrototype::FnPrototype(
@@ -951,10 +963,7 @@ Function* LlvmCodeGen::CloneFunction(Function* fn) {
 }
 
 Function* LlvmCodeGen::FinalizeFunction(Function* function) {
-  if (LIKELY(!function->hasFnAttribute(llvm::Attribute::NoInline))) {
-    function->addFnAttr(llvm::Attribute::AlwaysInline);
-  }
-
+  SetCPUAndInlineAttrs(function);
   if (!VerifyFunction(function)) {
     function->eraseFromParent(); // deletes function
     return NULL;
