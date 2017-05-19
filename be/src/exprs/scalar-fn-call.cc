@@ -136,10 +136,15 @@ Status ScalarFnCall::Prepare(RuntimeState* state, const RowDescriptor& desc,
           "more than $1. Codegen is needed. Please set DISABLE_CODEGEN to false.",
           fn_.name.function_name, MAX_INTERP_ARGS));
     }
+  } else {
+    // Add the expression to the list of expressions to codegen in the codegen phase.
+    state->AddScalarFnToCodegen(this);
+  }
 
+  if (!is_ir_udf) {
     Status status = LibCache::instance()->GetSoFunctionPtr(
         fn_.hdfs_location, fn_.scalar_fn.symbol, &scalar_fn_, &cache_entry_);
-    if (!status.ok()) {
+    if (UNLIKELY(!status.ok())) {
       if (fn_.binary_type == TFunctionBinaryType::BUILTIN) {
         // Builtins symbols should exist unless there is a version mismatch.
         return Status(TErrorCode::MISSING_BUILTIN, fn_.name.function_name,
@@ -150,14 +155,10 @@ Status ScalarFnCall::Prepare(RuntimeState* state, const RowDescriptor& desc,
             fn_.name.function_name, status.GetDetail()));
       }
     }
-  } else {
-    // Add the expression to the list of expressions to codegen in the codegen phase.
-    state->AddScalarFnToCodegen(this);
+    // For IR UDF, the loading of the Prepare() and Close() functions is deferred until
+    // first time GetCodegendComputeFn() is invoked.
+    RETURN_IF_ERROR(LoadPrepareAndCloseFn(NULL));
   }
-
-  // For IR UDF, the loading of the Prepare() and Close() functions is deferred until
-  // first time GetCodegendComputeFn() is invoked.
-  if (!is_ir_udf) RETURN_IF_ERROR(LoadPrepareAndCloseFn(NULL));
   return Status::OK();
 }
 
@@ -427,8 +428,16 @@ Status ScalarFnCall::GetCodegendComputeFn(LlvmCodeGen* codegen, Function** fn) {
         TErrorCode::UDF_VERIFY_FAILED, fn_.scalar_fn.symbol, fn_.hdfs_location);
   }
   ir_compute_fn_ = *fn;
-  // TODO: don't do this for child exprs
-  codegen->AddFunctionToJit(ir_compute_fn_, &scalar_fn_wrapper_);
+  return Status::OK();
+}
+
+Status ScalarFnCall::Codegen(LlvmCodeGen* codegen) {
+  if (ir_compute_fn_ == nullptr) {
+    Function* fn = nullptr;
+    RETURN_IF_ERROR(GetCodegendComputeFn(codegen, &fn));
+    DCHECK(fn == ir_compute_fn_);
+    codegen->AddFunctionToJit(ir_compute_fn_, &scalar_fn_wrapper_);
+  }
   return Status::OK();
 }
 

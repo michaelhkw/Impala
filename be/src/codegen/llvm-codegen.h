@@ -640,6 +640,10 @@ class LlvmCodeGen {
   static std::string cpu_name_;
   static std::vector<std::string> cpu_attrs_;
 
+  /// XXX
+  static std::string target_cpu_attr_;
+  static std::string target_features_attr_;
+
   /// A global shared call graph for all IR functions in the main module.
   /// Used for determining dependencies when materializing IR functions.
   static CodegenCallGraph shared_call_graph_;

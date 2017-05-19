@@ -106,6 +106,9 @@ string LlvmCodeGen::cpu_name_;
 vector<string> LlvmCodeGen::cpu_attrs_;
 CodegenCallGraph LlvmCodeGen::shared_call_graph_;
 
+string LlvmCodeGen::target_cpu_attr_;
+string LlvmCodeGen::target_features_attr_;
+
 [[noreturn]] static void LlvmCodegenHandleError(
     void* user_data, const std::string& reason, bool gen_crash_diag) {
   LOG(FATAL) << "LLVM hit fatal error: " << reason.c_str();
@@ -150,10 +153,20 @@ Status LlvmCodeGen::InitializeLlvm(bool load_backend) {
   // Validate the module by verifying that functions for all IRFunction::Type
   // can be found.
   for (int i = IRFunction::FN_START; i < IRFunction::FN_END; ++i) {
-    DCHECK(FN_MAPPINGS[i].fn == i);
+    DCHECK_EQ(FN_MAPPINGS[i].fn, i);
     const string& fn_name = FN_MAPPINGS[i].fn_name;
-    if (init_codegen->module_->getFunction(fn_name) == nullptr) {
+    Function* fn = init_codegen->module_->getFunction(fn_name);
+    if (fn == nullptr) {
       return Status(Substitute("Failed to find function $0", fn_name));
+    }
+    if (i == IRFunction::FN_START) {
+      target_cpu_attr_ = fn->getFnAttribute("target-cpu").getValueAsString();
+      LOG(INFO) << "target_cpu_attr: " << target_cpu_attr_;
+      target_features_attr_ = fn->getFnAttribute("target-features").getValueAsString();
+      LOG(INFO) << "target_features_attr: " << target_features_attr_;
+    } else {
+      DCHECK(fn->getFnAttribute("target-cpu").getValueAsString() == target_cpu_attr_);
+      DCHECK(fn->getFnAttribute("target-features").getValueAsString() == target_features_attr_);
     }
   }
 
@@ -628,8 +641,12 @@ Function* LlvmCodeGen::GetFunction(IRFunction::Type ir_type, bool clone) {
       LOG(ERROR) << "Unable to locate function " << fn_name;
       return NULL;
     }
-    // Mixing "NoInline" with "AlwaysInline" will lead to compilation failure.
-    if (!fn->hasFnAttribute(Attribute::NoInline)) fn->addFnAttr(Attribute::AlwaysInline);
+    // If there is no "noinline" attribute, add an inline hint to the function.
+    if (!fn->hasFnAttribute(Attribute::NoInline) && !fn->hasFnAttribute(Attribute::AlwaysInline)) {
+      fn->addFnAttr("target-cpu", target_cpu_attr_);
+      fn->addFnAttr("target-features", target_features_attr_);
+      fn->addFnAttr(Attribute::InlineHint);
+    }
     loaded_functions_[ir_type] = fn;
   }
   Status status = MaterializeFunction(fn);
@@ -952,7 +969,9 @@ Function* LlvmCodeGen::CloneFunction(Function* fn) {
 
 Function* LlvmCodeGen::FinalizeFunction(Function* function) {
   if (LIKELY(!function->hasFnAttribute(llvm::Attribute::NoInline))) {
-    function->addFnAttr(llvm::Attribute::AlwaysInline);
+    function->addFnAttr("target-cpu", target_cpu_attr_);
+    function->addFnAttr("target-features", target_features_attr_);
+    function->addFnAttr(Attribute::InlineHint);
   }
 
   if (!VerifyFunction(function)) {

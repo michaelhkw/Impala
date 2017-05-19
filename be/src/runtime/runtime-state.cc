@@ -170,8 +170,7 @@ Status RuntimeState::CreateCodegen() {
 
 Status RuntimeState::CodegenScalarFns() {
   for (ScalarFnCall* scalar_fn : scalar_fns_to_codegen_) {
-    Function* fn;
-    RETURN_IF_ERROR(scalar_fn->GetCodegendComputeFn(codegen_.get(), &fn));
+    RETURN_IF_ERROR(scalar_fn->Codegen(codegen_.get()));
   }
   return Status::OK();
 }
