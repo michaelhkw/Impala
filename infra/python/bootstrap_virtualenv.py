@@ -60,8 +60,13 @@ COMPILED_REQS_PATH = os.path.join(DEPS_DIR, "compiled-requirements.txt")
 # by the compiled requirements step.
 KUDU_REQS_PATH = os.path.join(DEPS_DIR, "kudu-requirements.txt")
 
+# Requirements for the bootstrapping step for ADLS that builds compiled requirements
+# with toolchain gcc.
+ADLS_COMPILED_REQS_PATH = os.path.join(DEPS_DIR, "adls-compiled-requirements.txt")
+
 # Requirements for the ADLS test client step, which depends on Cffi (C Foreign Function
-# Interface) being installed by the compiled requirements step.
+# Interface), 'pycparser'  and 'cryptography' being installed by the ADLS compiled
+# requirements step.
 ADLS_REQS_PATH = os.path.join(DEPS_DIR, "adls-requirements.txt")
 
 def delete_virtualenv_if_exist():
@@ -191,10 +196,10 @@ def toolchain_pkg_dir(pkg_name):
   pkg_version = os.environ["IMPALA_" + pkg_name.upper() + "_VERSION"]
   return os.path.join(os.environ["IMPALA_TOOLCHAIN"], pkg_name + "-" + pkg_version)
 
-def install_compiled_deps_if_possible():
+def install_compiled_deps_if_possible(compiled_reqs):
   '''Install dependencies that require compilation with toolchain GCC, if the toolchain
   is available. Returns true if the deps are installed'''
-  if reqs_are_installed(COMPILED_REQS_PATH):
+  if reqs_are_installed(compiled_reqs):
     LOG.debug("Skipping compiled deps: matching compiled-installed-requirements.txt found")
     return True
   cc = select_cc()
@@ -213,8 +218,18 @@ def install_compiled_deps_if_possible():
     env["CFLAGS"] = "-fgnu89-inline"
 
   LOG.info("Installing compiled requirements into the virtualenv")
-  exec_pip_install(["-r", COMPILED_REQS_PATH], cc=cc, env=env)
-  mark_reqs_installed(COMPILED_REQS_PATH)
+  exec_pip_install(["-r", compiled_reqs], cc=cc, env=env)
+  mark_reqs_installed(compiled_reqs)
+  return True
+
+def install_all_compiled_deps_if_possible():
+  '''Installs all the compiled dependencies that require compilation with toolchain GCC,
+  if the toolchain is available. Returns true once all of them are installed'''
+  ret = install_compiled_deps_if_possible(COMPILED_REQS_PATH)
+  if ret == False: return False
+  if os.environ.get('TARGET_FILESYSTEM') == "adls":
+    ret = install_compiled_deps_if_possible(ADLS_COMPILED_REQS_PATH)
+    if ret == False: return False
   return True
 
 def install_adls_deps():
@@ -362,6 +377,6 @@ if __name__ == "__main__":
 
   # Complete as many bootstrap steps as possible (see file comment for the steps).
   setup_virtualenv_if_not_exists()
-  if install_compiled_deps_if_possible():
+  if install_all_compiled_deps_if_possible():
     install_kudu_client_if_possible()
     install_adls_deps()
