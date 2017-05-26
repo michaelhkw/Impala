@@ -17,6 +17,8 @@
 
 #include "runtime/runtime-filter.h"
 
+#include "exprs/expr.h"
+#include "exec/filter-context.h"
 #include "runtime/raw-value.h"
 
 using namespace impala;
@@ -28,4 +30,13 @@ bool RuntimeFilter::Eval(void* val, const ColumnType& col_type) const noexcept {
   uint32_t h = RawValue::GetHashValue(val, col_type,
       RuntimeFilterBank::DefaultHashSeed());
   return bloom_filter_->Find(h);
+}
+
+
+IR_ALWAYS_INLINE void FilterContext::Insert(TupleRow* row) const noexcept {
+  if (local_bloom_filter == NULL) return;
+  void* e = expr_ctx->GetValue(row);
+  uint32_t filter_hash = RawValue::GetHashValue(
+      e, expr_ctx->root()->type(), RuntimeFilterBank::DefaultHashSeed());
+  local_bloom_filter->Insert(filter_hash);
 }

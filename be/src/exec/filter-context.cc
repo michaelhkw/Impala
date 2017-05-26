@@ -78,6 +78,7 @@ bool FilterContext::Eval(TupleRow* row) const noexcept {
   return filter->Eval(e, expr_ctx->root()->type());
 }
 
+/*
 void FilterContext::Insert(TupleRow* row) const noexcept {
   if (local_bloom_filter == NULL) return;
   void* e = expr_ctx->GetValue(row);
@@ -85,6 +86,7 @@ void FilterContext::Insert(TupleRow* row) const noexcept {
       e, expr_ctx->root()->type(), RuntimeFilterBank::DefaultHashSeed());
   local_bloom_filter->Insert(filter_hash);
 }
+*/
 
 // An example of the generated code for TPCH-Q2: RF002 -> n_regionkey
 //

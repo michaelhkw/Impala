@@ -117,6 +117,7 @@ __m256i BloomFilter::MakeMask(const uint32_t hash) {
   return _mm256_sllv_epi32(ones, hash_data);
 }
 
+  /*
 void BloomFilter::BucketInsertAVX2(
     const uint32_t bucket_idx, const uint32_t hash) noexcept {
   const __m256i mask = MakeMask(hash);
@@ -126,6 +127,7 @@ void BloomFilter::BucketInsertAVX2(
   // dont have to save them off before using XMM registers.
   _mm256_zeroupper();
 }
+  */
 
 bool BloomFilter::BucketFindAVX2(
     const uint32_t bucket_idx, const uint32_t hash) const noexcept {
