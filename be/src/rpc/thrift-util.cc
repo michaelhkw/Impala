@@ -188,8 +188,10 @@ bool TNetworkAddressComparator(const TNetworkAddress& a, const TNetworkAddress& 
 
 bool IsRecvTimeoutTException(const TTransportException& e) {
   // String taken from TSocket::read() Thrift's TSocket.cpp.
-  return e.getType() == TTransportException::TIMED_OUT &&
-      strstr(e.what(), "EAGAIN (timed out)") != nullptr;
+  return (e.getType() == TTransportException::TIMED_OUT &&
+             strstr(e.what(), "EAGAIN (timed out)") != nullptr) ||
+         (e.getType() == TTransportException::INTERNAL_ERROR &&
+             strstr(e.what(), "SSL_read: Resource temporarily unavailable") != nullptr);
 }
 
 // This function implements some heuristics to match against exception details
