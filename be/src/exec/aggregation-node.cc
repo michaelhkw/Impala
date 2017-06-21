@@ -268,7 +268,8 @@ void AggregationNode::Close(RuntimeState* state) {
   // but we don't actually need the result, so allocate a single dummy tuple to avoid
   // accumulating memory.
   Tuple* dummy_dst = nullptr;
-  if (needs_finalize_ && output_tuple_desc_ != nullptr) {
+  // 'tuple_pool_' can be NULL if Prepare() failed.
+  if (needs_finalize_ && tuple_pool_.get() != nullptr) {
     dummy_dst = Tuple::Create(output_tuple_desc_->byte_size(), tuple_pool_.get());
   }
   while (!output_iterator_.AtEnd()) {
