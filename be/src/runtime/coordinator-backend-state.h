@@ -135,6 +135,9 @@ class Coordinator::BackendState {
     /// owned by coordinator object pool provided in the c'tor, created in Update()
     RuntimeProfile* profile_;
 
+    /// true if the fragment instance is done. Used to handle duplicated done message.
+    bool done_;
+
     /// true after the first call to profile->Update()
     bool profile_created_;
 
