@@ -62,22 +62,23 @@ class FaultInjectionUtil {
   /// 'is_send' indicates whether injected fault is at the send RPC call or recv RPC.
   ///  It's true if for send RPC call and false for recv RPC call.
   /// FLAGS_fault_injection_rpc_exception_type specifies the exception to be injected.
-  static void InjectRpcException(RpcCallType my_type, bool is_send);
+    static void InjectRpcException(RpcCallType my_type, bool is_send, int freq);
 
  private:
   static int32_t GetTargetRPCType();
 
 };
 
-#define FAULT_INJECTION_RPC_DELAY(type)                         \
+#define FAULT_INJECTION_RPC_DELAY(type)                          \
     FaultInjectionUtil::InjectRpcDelay(FaultInjectionUtil::type)
-#define FAULT_INJECTION_RPC_EXCEPTION(type, is_send)            \
-    FaultInjectionUtil::InjectRpcException(FaultInjectionUtil::type, is_send)
+#define FAULT_INJECTION_RPC_EXCEPTION(type, is_send, freq)       \
+    FaultInjectionUtil::InjectRpcException(                      \
+        FaultInjectionUtil::type, is_send, freq)
 
 #else // NDEBUG
 
 #define FAULT_INJECTION_RPC_DELAY(type)
-#define FAULT_INJECTION_RPC_EXCEPTION(type, is_send)
+#define FAULT_INJECTION_RPC_EXCEPTION(type, is_send, freq)
 
 #endif
 

@@ -67,7 +67,13 @@ class TestRPCException(CustomClusterTestSuite):
   @CustomClusterTestSuite.with_args("--fault_injection_rpc_exception_type=3"
       " --fault_injection_rpc_type=5")
   def test_transmitdata_recv_lost_connection(self, vector):
-    self.execute_test_query("Called read on non-open socket")
+    self.execute_test_query("No more data to read.")
+
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args("--fault_injection_rpc_exception_type=3"
+      " --fault_injection_rpc_type=6")
+  def test_reportexecstatus_recv_lost_connection(self, vector):
+    self.execute_test_query(None)
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args("--fault_injection_rpc_exception_type=4"
@@ -85,7 +91,7 @@ class TestRPCException(CustomClusterTestSuite):
   @CustomClusterTestSuite.with_args("--fault_injection_rpc_exception_type=6"
       " --fault_injection_rpc_type=5")
   def test_transmitdata_secure_send_timed_out(self, vector):
-    self.execute_test_query("SSL_write: Resource temporarily unavailable")
+    self.execute_test_query(None);
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args("--fault_injection_rpc_exception_type=7"

@@ -51,7 +51,8 @@ void FaultInjectionUtil::InjectRpcDelay(RpcCallType my_type) {
   if (target_rpc_type == my_type) SleepForMs(delay_ms);
 }
 
-void FaultInjectionUtil::InjectRpcException(RpcCallType my_type, bool is_send) {
+void FaultInjectionUtil::InjectRpcException(
+    RpcCallType my_type, bool is_send, int freq) {
   static AtomicInt32 send_count(-1);
   static AtomicInt32 recv_count(-1);
   int32_t xcp_type = FLAGS_fault_injection_rpc_exception_type;
@@ -59,10 +60,11 @@ void FaultInjectionUtil::InjectRpcException(RpcCallType my_type, bool is_send) {
 
   // We currently support injecting exception at TransmitData() RPC only.
   int32_t target_rpc_type = GetTargetRPCType();
-  DCHECK_EQ(target_rpc_type, RPC_TRANSMITDATA);
+  DCHECK(target_rpc_type == RPC_TRANSMITDATA || target_rpc_type == RPC_REPORTEXECSTATUS);
+  if (target_rpc_type != my_type) return;
 
   if (is_send) {
-    if (send_count.Add(1) % 1024 == 0) {
+    if (send_count.Add(1) % freq == 0) {
       switch (xcp_type) {
         case RPC_EXCEPTION_SEND_LOST_CONNECTION:
           throw TTransportException(TTransportException::NOT_OPEN,
@@ -78,11 +80,11 @@ void FaultInjectionUtil::InjectRpcException(RpcCallType my_type, bool is_send) {
       }
     }
   } else {
-    if (recv_count.Add(1) % 1024 == 0) {
+    if (recv_count.Add(1) % freq == 0) {
       switch (xcp_type) {
         case RPC_EXCEPTION_RECV_LOST_CONNECTION:
-          throw TTransportException(TTransportException::NOT_OPEN,
-              "Called read on non-open socket");
+          throw TTransportException(TTransportException::END_OF_FILE,
+	     "No more data to read.");
         case RPC_EXCEPTION_RECV_TIMEDOUT:
           throw TTransportException(TTransportException::TIMED_OUT,
               "EAGAIN (timed out)");

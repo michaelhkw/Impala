@@ -324,28 +324,42 @@ bool Coordinator::BackendState::Cancel() {
   // set an error status to make sure we only cancel this once
   if (status_.ok()) status_ = Status::CANCELLED;
 
-  Status status;
-  ImpalaBackendConnection backend_client(
-      ExecEnv::GetInstance()->impalad_client_cache(), impalad_address(), &status);
-  if (!status.ok()) return false;
   TCancelQueryFInstancesParams params;
   params.protocol_version = ImpalaInternalServiceVersion::V1;
   params.__set_query_id(query_id_);
   TCancelQueryFInstancesResult dummy;
   VLOG_QUERY << "sending CancelQueryFInstances rpc for query_id="
-             << query_id_ << " backend=" << impalad_address();
+             << query_id_ << " backend=" << TNetworkAddressToString(impalad_address());
+
   Status rpc_status;
-  // Try to send the RPC 3 times before failing.
-  bool retry_is_safe;
+  Status client_status;
+  bool connect_success = false;
+  // Try to send the RPC 3 times before failing. Sleep for 100ms between retries.
   for (int i = 0; i < 3; ++i) {
-    rpc_status = backend_client.DoRpc(
-        &ImpalaBackendClient::CancelQueryFInstances, params, &dummy, &retry_is_safe);
-    if (rpc_status.ok() || !retry_is_safe) break;
+    ImpalaBackendConnection backend_client(ExecEnv::GetInstance()->impalad_client_cache(),
+        impalad_address(), &client_status);
+    if (client_status.ok()) {
+      connect_success = true;
+      rpc_status = backend_client.DoRpc(
+          &ImpalaBackendClient::CancelQueryFInstances, params, &dummy);
+      if (rpc_status.ok()) break;
+    }
+    if (i < 2) SleepForMs(100);
+  }
+  if (!client_status.ok()) {
+    status_.MergeStatus(client_status);
+    stringstream msg;
+    msg << "CancelQueryFInstances query_id= " << query_id_
+        << " failed to connect to " << TNetworkAddressToString(impalad_address())
+        << " :" << client_status.msg().msg();
+    status_.AddDetail(msg.str());
+    return connect_success;
   }
   if (!rpc_status.ok()) {
     status_.MergeStatus(rpc_status);
     stringstream msg;
-    msg << "CancelQueryFInstances rpc query_id=" << query_id_
+    msg << "CancelQueryFInstances query_id= " << query_id_
+        << " rpc to " << TNetworkAddressToString(impalad_address())
         << " failed: " << rpc_status.msg().msg();
     status_.AddDetail(msg.str());
     return true;
