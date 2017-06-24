@@ -244,14 +244,16 @@ class ClientConnection {
             "Client $0 timed-out during recv call.", TNetworkAddressToString(address_)));
       }
 
-      // Client may have unexpectedly been closed, so re-open and retry once if we
-      // didn't successfully send the payload yet.
-      if (!send_done) return RetryRpc(f, request, response);
+      // Client may have unexpectedly been closed, so re-open and retry once if we didn't
+      // successfully send the payload yet or if the caller always wants a retry.
+      if (!send_done) {
+        return RetryRpc(f, request, response);
+      }
 
       // Payload was sent and failure wasn't a timeout waiting for response. Fail the RPC.
-      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e));
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
     } catch (const apache::thrift::TException& e) {
-      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e));
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
     }
     client_is_unrecoverable_ = false;
     return Status::OK();
@@ -290,9 +292,10 @@ class ClientConnection {
   /// recovered.
   bool client_is_unrecoverable_;
 
-  std::string ExceptionMsg(const apache::thrift::TException& e) {
-    return strings::Substitute("Client for $0 hits an unexpected exception: $1, type: $2",
-        TNetworkAddressToString(address_), e.what(), typeid(e).name());
+  std::string ExceptionMsg(const apache::thrift::TException& e, bool send_done) {
+    return strings::Substitute("Client for $0 hits an unexpected exception: $1, type: $2"
+        " rpc send $3 done", TNetworkAddressToString(address_), e.what(),
+        typeid(e).name(), send_done ? "was" : "wasn't");
   }
 
   /// Retry the RPC if TCP connection underpinning this client has been closed
@@ -308,14 +311,14 @@ class ClientConnection {
     if (!status.ok()) {
       return Status(TErrorCode::RPC_CLIENT_CONNECT_FAILURE, status.GetDetail());
     }
+    bool send_done = false;
     try {
-      bool send_done = false;
       (client_->*f)(*response, request, &send_done);
     } catch (const apache::thrift::TException& e) {
       // By this point the RPC really has failed.
       // TODO: Revisit this logic later. It's possible that the new connection
       // works but we hit timeout here.
-      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e));
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
     }
     client_is_unrecoverable_ = false;
     return Status::OK();
