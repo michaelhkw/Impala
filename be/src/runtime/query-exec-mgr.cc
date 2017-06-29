@@ -73,7 +73,7 @@ QueryState* QueryExecMgr::GetQueryState(const TUniqueId& query_id) {
   QueryState* qs = nullptr;
   int refcnt;
   {
-    lock_guard<mutex> l(qs_map_lock_);
+    lock_guard<SpinLock> l(qs_map_lock_);
     auto it = qs_map_.find(query_id);
     if (it == qs_map_.end()) return nullptr;
     qs = it->second;
@@ -89,7 +89,7 @@ QueryState* QueryExecMgr::GetOrCreateQueryState(
   QueryState* qs = nullptr;
   int refcnt;
   {
-    lock_guard<mutex> l(qs_map_lock_);
+    lock_guard<SpinLock> l(qs_map_lock_);
     auto it = qs_map_.find(query_ctx.query_id);
     if (it == qs_map_.end()) {
       // register new QueryState
@@ -143,7 +143,7 @@ void QueryExecMgr::ReleaseQueryState(QueryState* qs) {
   QueryState* qs_from_map = nullptr;
   {
     // for now, gc right away
-    lock_guard<mutex> l(qs_map_lock_);
+    lock_guard<SpinLock> l(qs_map_lock_);
     auto it = qs_map_.find(query_id);
     // someone else might have gc'd the entry
     if (it == qs_map_.end()) return;

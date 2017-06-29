@@ -23,6 +23,7 @@
 #include <unordered_map>
 
 #include "common/status.h"
+#include "util/spinlock.h"
 #include "util/uid-util.h"
 #include "gen-cpp/Types_types.h"
 
@@ -65,7 +66,7 @@ class QueryExecMgr {
 
  private:
   /// protects qs_map_
-  boost::mutex qs_map_lock_;
+  SpinLock qs_map_lock_;
 
   /// map from query id to QueryState (owned by us)
   std::unordered_map<TUniqueId, QueryState*> qs_map_;
