@@ -51,7 +51,7 @@ class ImpalaBackendClient : public ImpalaInternalServiceClient {
     FAULT_INJECTION_SEND_RPC_EXCEPTION(5);
     ImpalaInternalServiceClient::send_ExecQueryFInstances(params);
     *send_done = true;
-    // Cannot inject fault on recv() side as the callers cannot handle it.
+    FAULT_INJECTION_RECV_RPC_EXCEPTION(5);
     ImpalaInternalServiceClient::recv_ExecQueryFInstances(_return);
   }
 

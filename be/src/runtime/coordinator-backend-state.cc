@@ -167,7 +167,7 @@ void Coordinator::BackendState::Exec(
       << " host=" << impalad_address() << " query_id=" << PrintId(query_id_);
 
   // guard against concurrent UpdateBackendExecStatus() that may arrive after RPC returns
-  lock_guard<mutex> l(lock_);
+  unique_lock<mutex> l(lock_);
   int64_t start = MonotonicMillis();
 
   ImpalaBackendConnection backend_client(
@@ -178,6 +178,17 @@ void Coordinator::BackendState::Exec(
   Status rpc_status = backend_client.DoRpc(
       &ImpalaBackendClient::ExecQueryFInstances, rpc_params, &thrift_result);
   rpc_sent_ = true;
+  if (rpc_status.code() == TErrorCode::RPC_RECV_TIMEOUT) {
+    // Cancellation also needs 'lock_' so don't hold it when retrying for a response.
+    // Otherwise, we may be stuck in the loop below forever.
+    l.unlock();
+    // Racily read 'status_'.
+    while (rpc_status.code() == TErrorCode::RPC_RECV_TIMEOUT && status_.ok()) {
+      rpc_status = backend_client.RetryRpcRecv(&ImpalaBackendClient::recv_ExecQueryFInstances,
+          &thrift_result);
+    }
+    l.lock();
+  }
   rpc_latency_ = MonotonicMillis() - start;
 
   const string ERR_TEMPLATE =
