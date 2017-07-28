@@ -90,9 +90,7 @@ set_dep_root(RAPIDJSON)
 set_dep_root(SNAPPY)
 set_dep_root(THRIFT)
 set_dep_root(ZLIB)
-if (APPLE)
-  set_dep_root(OPENSSL)
-endif()
+set_dep_root(OPENSSL)
 
 # The boost-cmake project hasn't been maintained for years. Let's make sure we
 # don't accidentally use it if it can be found.
@@ -146,9 +144,10 @@ include_directories(${Boost_INCLUDE_DIRS})
 message(STATUS "Boost include dir: " ${Boost_INCLUDE_DIRS})
 message(STATUS "Boost libraries: " ${Boost_LIBRARIES})
 
+set(OPENSSL_DIR ${OPENSSL_ROOT})
 find_package(OpenSSL REQUIRED)
-IMPALA_ADD_THIRDPARTY_LIB(openssl_ssl ${OPENSSL_INCLUDE_DIR} "" ${OPENSSL_SSL_LIBRARY})
-IMPALA_ADD_THIRDPARTY_LIB(openssl_crypto "" "" ${OPENSSL_CRYPTO_LIBRARY})
+IMPALA_ADD_THIRDPARTY_LIB(openssl_ssl ${OPENSSL_ROOT}/include "" ${OPENSSL_ROOT}/lib/libssl.so)
+IMPALA_ADD_THIRDPARTY_LIB(openssl_crypto "" "" ${OPENSSL_ROOT}/lib/libcrypto.so)
 
 find_package(Bzip2 REQUIRED)
 IMPALA_ADD_THIRDPARTY_LIB(bzip2 ${BZIP2_INCLUDE_DIR} ${BZIP2_STATIC_LIBRARIES} "")
