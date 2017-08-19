@@ -213,6 +213,7 @@ DEFINE_bool(is_executor, true, "If true, this Impala daemon will execute query "
 DEFINE_string(local_nodemanager_url, "", "Deprecated");
 
 DECLARE_bool(compact_catalog_topic);
+DECLARE_int32(krpc_port);
 
 namespace impala {
 
@@ -1653,6 +1654,8 @@ void ImpalaServer::AddLocalBackendToStatestore(
     return;
   }
   local_backend_descriptor.ip_address = ip;
+  local_backend_descriptor.__set_krpc_svc_address(
+      MakeNetworkAddress(ip, FLAGS_krpc_port));
   subscriber_topic_updates->emplace_back(TTopicDelta());
   TTopicDelta& update = subscriber_topic_updates->back();
   update.topic_name = Scheduler::IMPALA_MEMBERSHIP_TOPIC;

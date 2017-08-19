@@ -68,6 +68,9 @@ struct TBackendDescriptor {
 
   // True if the debug webserver is secured (for correctly generating links)
   6: optional bool secure_webserver;
+
+  // Network address of KRPC based service on this backend
+  7: optional Types.TNetworkAddress krpc_svc_address;
 }
 
 // Description of a single entry in a topic

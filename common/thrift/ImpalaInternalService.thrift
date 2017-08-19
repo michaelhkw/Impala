@@ -396,6 +396,9 @@ struct TPlanFragmentDestination {
 
   // ... which is being executed on this server
   2: required Types.TNetworkAddress server
+
+  // the address of the KRPC services on the destination
+  3: optional Types.TNetworkAddress krpc_server
 }
 
 // Context to collect information, which is shared among all instances of that plan

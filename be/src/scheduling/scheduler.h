@@ -319,6 +319,11 @@ class Scheduler {
   ExecutorsConfigPtr GetExecutorsConfig() const;
   void SetExecutorsConfig(const ExecutorsConfigPtr& executors_config);
 
+  /// Returns the backend descriptor corresponding to 'host' which could be a remote
+  /// backend or the local host itself.
+  const TBackendDescriptor& LookUpBackendDesc(
+      const BackendConfig& executor_config, const TNetworkAddress& host);
+
   /// Called asynchronously when an update is received from the subscription manager
   void UpdateMembership(const StatestoreSubscriber::TopicDeltaMap& incoming_topic_deltas,
       std::vector<TTopicDelta>* subscriber_topic_updates);
@@ -332,7 +337,9 @@ class Scheduler {
   /// Unpartitioned fragments are assigned to the coordinator. Populate the schedule's
   /// fragment_exec_params_ with the resulting scan range assignment.
   /// We have a benchmark for this method in be/src/benchmarks/scheduler-benchmark.cc.
-  Status ComputeScanRangeAssignment(QuerySchedule* schedule);
+  /// 'executor_config' is the executor configuration to use for scheduling.
+  Status ComputeScanRangeAssignment(const BackendConfig& executor_config,
+      QuerySchedule* schedule);
 
   /// Process the list of scan ranges of a single plan node and compute scan range
   /// assignments (returned in 'assignment'). The result is a mapping from hosts to their
@@ -408,7 +415,9 @@ class Scheduler {
   /// TQueryExecRequest.plan_exec_info.
   /// This includes the routing information (destinations, per_exch_num_senders,
   /// sender_id)
-  void ComputeFragmentExecParams(QuerySchedule* schedule);
+  /// 'executor_config' is the executor configuration to use for scheduling.
+  void ComputeFragmentExecParams(const BackendConfig& executor_config,
+      QuerySchedule* schedule);
 
   /// Recursively create FInstanceExecParams and set per_node_scan_ranges for
   /// fragment_params and its input fragments via a depth-first traversal.

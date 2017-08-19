@@ -57,6 +57,10 @@ class BackendConfig {
   /// blocking on the OS.
   bool LookUpBackendIp(const Hostname& hostname, IpAddr* ip) const;
 
+  /// Look up the backend descriptor for the backend with hostname 'host'.
+  /// Returns NULL if it's not found.
+  const TBackendDescriptor* LookUpBackendDesc(const TNetworkAddress& host) const;
+
   int NumBackends() const { return backend_map_.size(); }
 
  private:

@@ -84,6 +84,7 @@ DECLARE_int32(state_store_port);
 DECLARE_int32(num_threads_per_core);
 DECLARE_int32(num_cores);
 DECLARE_int32(be_port);
+DECLARE_int32(krpc_port);
 DECLARE_string(mem_limit);
 DECLARE_string(buffer_pool_limit);
 DECLARE_int64(min_buffer_size);
@@ -167,6 +168,7 @@ ExecEnv::ExecEnv(const string& hostname, int backend_port, int subscriber_port,
     backend_address_(MakeNetworkAddress(hostname, backend_port)) {
 
   if (FLAGS_use_krpc) {
+    DCHECK_GT(FLAGS_krpc_port, 0);
     stream_mgr_.reset(new KrpcDataStreamMgr(metrics_.get()));
   } else {
     stream_mgr_.reset(new DataStreamMgr(metrics_.get()));

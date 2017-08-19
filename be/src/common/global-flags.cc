@@ -36,6 +36,7 @@ DEFINE_string(hostname, "", "Hostname to use for this daemon, also used as part 
               " used");
 
 DEFINE_int32(be_port, 22000, "port on which ImpalaInternalService is exported");
+DEFINE_int32(krpc_port, 29000, "port on Kudu RPC based services is exported");
 
 // Kerberos is enabled if and only if principal is set.
 DEFINE_string(principal, "", "Kerberos principal. If set, both client and backend network"

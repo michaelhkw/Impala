@@ -86,4 +86,16 @@ bool BackendConfig::LookUpBackendIp(const Hostname& hostname, IpAddr* ip) const 
   return false;
 }
 
+const TBackendDescriptor* BackendConfig::LookUpBackendDesc(
+    const TNetworkAddress& host) const {
+  IpAddr ip;
+  if (LIKELY(LookUpBackendIp(host.hostname, &ip))) {
+    const BackendConfig::BackendList& be_list = GetBackendListForHost(ip);
+    for (const TBackendDescriptor& desc : be_list) {
+      if (desc.address == host) return &desc;
+    }
+  }
+  return nullptr;
+}
+
 }  // end ns impala
