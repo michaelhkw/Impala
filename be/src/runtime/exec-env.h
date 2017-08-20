@@ -53,6 +53,7 @@ class ObjectPool;
 class QueryResourceMgr;
 class RequestPoolService;
 class ReservationTracker;
+class RpcMgr;
 class Scheduler;
 class StatestoreSubscriber;
 class ThreadResourceMgr;
@@ -166,6 +167,7 @@ class ExecEnv {
   boost::scoped_ptr<CallableThreadPool> exec_rpc_thread_pool_;
   boost::scoped_ptr<CallableThreadPool> async_rpc_pool_;
   boost::scoped_ptr<QueryExecMgr> query_exec_mgr_;
+  boost::scoped_ptr<RpcMgr> rpc_mgr_;
 
   /// Query-wide buffer pool and the root reservation tracker for the pool. The
   /// reservation limit is equal to the maximum capacity of the pool. Created in

@@ -28,6 +28,7 @@
 #include "common/object-pool.h"
 #include "exec/kudu-util.h"
 #include "gen-cpp/ImpalaInternalService.h"
+#include "rpc/rpc-mgr.h"
 #include "runtime/backend-client.h"
 #include "runtime/bufferpool/buffer-pool.h"
 #include "runtime/bufferpool/reservation-tracker.h"
@@ -169,6 +170,7 @@ ExecEnv::ExecEnv(const string& hostname, int backend_port, int subscriber_port,
 
   if (FLAGS_use_krpc) {
     DCHECK_GT(FLAGS_krpc_port, 0);
+    rpc_mgr_.reset(new RpcMgr());
     stream_mgr_.reset(new KrpcDataStreamMgr(metrics_.get()));
   } else {
     stream_mgr_.reset(new DataStreamMgr(metrics_.get()));
@@ -273,6 +275,9 @@ Status ExecEnv::StartServices() {
   RETURN_IF_ERROR(RegisterMemoryMetrics(
       metrics_.get(), true, buffer_reservation_.get(), buffer_pool_.get()));
 
+  // Initialize the RPCMgr before allowing services registration.
+  if (FLAGS_use_krpc) RETURN_IF_ERROR(rpc_mgr_->Init());
+
   // Limit of -1 means no memory limit.
   mem_tracker_.reset(new MemTracker(AggregateMemoryMetrics::TOTAL_USED,
       no_process_mem_limit ? -1 : bytes_limit, "Process"));
@@ -343,6 +348,7 @@ Status ExecEnv::StartServices() {
     }
   }
 
+  if (FLAGS_use_krpc) RETURN_IF_ERROR(rpc_mgr_->StartServices(FLAGS_krpc_port));
   return Status::OK();
 }
 
