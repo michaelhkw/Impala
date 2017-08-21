@@ -62,6 +62,7 @@ void RpcController::Reset() {
     CHECK(finished());
   }
   call_.reset();
+  outbound_sidecars_.clear();
   required_server_features_.clear();
   credentials_policy_ = CredentialsPolicy::ANY_CREDENTIALS;
   messenger_ = nullptr;

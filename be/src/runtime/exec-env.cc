@@ -28,6 +28,7 @@
 #include "common/object-pool.h"
 #include "exec/kudu-util.h"
 #include "gen-cpp/ImpalaInternalService.h"
+#include "kudu/rpc/service_if.h"
 #include "rpc/rpc-mgr.h"
 #include "runtime/backend-client.h"
 #include "runtime/bufferpool/buffer-pool.h"
@@ -47,6 +48,7 @@
 #include "scheduling/admission-controller.h"
 #include "scheduling/request-pool-service.h"
 #include "scheduling/scheduler.h"
+#include "service/data-stream-service.h"
 #include "service/frontend.h"
 #include "statestore/statestore-subscriber.h"
 #include "util/debug-util.h"
@@ -64,6 +66,7 @@
 #include "common/names.h"
 
 using boost::algorithm::join;
+using kudu::rpc::ServiceIf;
 using namespace strings;
 
 DEFINE_bool_hidden(use_statestore, true, "Deprecated, do not use");
@@ -77,9 +80,14 @@ DEFINE_int32(state_store_subscriber_port, 23000,
 DEFINE_int32(num_hdfs_worker_threads, 16,
     "(Advanced) The number of threads in the global HDFS operation pool");
 DEFINE_bool(disable_admission_control, false, "Disables admission control.");
-DEFINE_bool_hidden(use_krpc, false, "Used to indicate whether to use Kudu RPC for the "
+DEFINE_bool(use_krpc, false, "Used to indicate whether to use Kudu RPC for the "
     "DataStream subsystem, or the Thrift RPC layer instead. Defaults to false. "
     "KRPC not yet supported");
+
+// XXX
+DEFINE_int32(datastream_service_queue_depth, 1024, "Size of datastream service queue");
+DEFINE_int32(datastream_service_num_svc_threads, 64,
+    "Number of datastream service processing threads");
 
 DECLARE_int32(state_store_port);
 DECLARE_int32(num_threads_per_core);
@@ -276,7 +284,12 @@ Status ExecEnv::StartServices() {
       metrics_.get(), true, buffer_reservation_.get(), buffer_pool_.get()));
 
   // Initialize the RPCMgr before allowing services registration.
-  if (FLAGS_use_krpc) RETURN_IF_ERROR(rpc_mgr_->Init());
+  if (FLAGS_use_krpc) {
+    RETURN_IF_ERROR(rpc_mgr_->Init());
+    unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get()));
+    RETURN_IF_ERROR(rpc_mgr_->RegisterService(FLAGS_datastream_service_num_svc_threads,
+         FLAGS_datastream_service_queue_depth, move(data_svc)));
+  }
 
   // Limit of -1 means no memory limit.
   mem_tracker_.reset(new MemTracker(AggregateMemoryMetrics::TOTAL_USED,
@@ -348,6 +361,7 @@ Status ExecEnv::StartServices() {
     }
   }
 
+  // Wait till the end until everything has started before accepting incoming calls.
   if (FLAGS_use_krpc) RETURN_IF_ERROR(rpc_mgr_->StartServices(FLAGS_krpc_port));
   return Status::OK();
 }

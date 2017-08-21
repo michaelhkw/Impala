@@ -541,6 +541,10 @@ add_subdirectory(src/experiments)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
 add_subdirectory(generated-sources/gen-cpp)
 
+# Protobuf generated files
+add_custom_target(pb-deps ALL DEPENDS common-pb-deps data-stream-svc-pb-deps row-batch-pb-deps)
+add_custom_target(gen-deps ALL DEPENDS thrift-deps pb-deps)
+
 link_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/build/bufferpool
   ${CMAKE_CURRENT_SOURCE_DIR}/build/catalog

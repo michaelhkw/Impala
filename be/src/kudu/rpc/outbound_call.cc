@@ -449,6 +449,11 @@ bool OutboundCall::IsOnOutboundQueue() const {
   return state_ == ON_OUTBOUND_QUEUE;
 }
 
+bool OutboundCall::IsSending() const {
+  std::lock_guard<simple_spinlock> l(lock_);
+  return state_ == SENDING;
+}
+
 bool OutboundCall::IsInTransmission() const {
   std::lock_guard<simple_spinlock> l(lock_);
   return state_ == ON_OUTBOUND_QUEUE || state_ == SENDING;

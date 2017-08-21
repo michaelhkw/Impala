@@ -45,6 +45,7 @@
 #include "common/version.h"
 #include "exec/external-data-source-executor.h"
 #include "rpc/authentication.h"
+#include "rpc/rpc-mgr.h"
 #include "rpc/rpc-trace.h"
 #include "rpc/thrift-thread.h"
 #include "rpc/thrift-util.h"
@@ -212,8 +213,10 @@ DEFINE_bool(is_executor, true, "If true, this Impala daemon will execute query "
 // TODO: Remove for Impala 3.0.
 DEFINE_string(local_nodemanager_url, "", "Deprecated");
 
-DECLARE_bool(compact_catalog_topic);
 DECLARE_int32(krpc_port);
+DECLARE_bool(compact_catalog_topic);
+
+
 
 namespace impala {
 

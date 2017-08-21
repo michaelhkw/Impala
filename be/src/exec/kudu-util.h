@@ -25,6 +25,7 @@ struct tm;
 #include <kudu/client/client.h>
 
 #include "common/status.h"
+#include "kudu/rpc/rpc_header.pb.h"
 #include "runtime/string-value.h"
 #include "runtime/types.h"
 
@@ -77,6 +78,14 @@ void LogKuduMessage(kudu::client::KuduLogSeverity severity, const char* filename
 /// is being used.
 Status WriteKuduValue(int col, PrimitiveType type, const void* value,
     bool copy_strings, kudu::KuduPartialRow* row) WARN_UNUSED_RESULT;
+
+inline Status FromKuduStatus(
+    const kudu::Status& k_status, const std::string prepend = "") {
+  if (LIKELY(k_status.ok())) return Status::OK();
+  if (prepend.empty()) return Status(k_status.ToString());
+  return Status(strings::Substitute("$0: $1", prepend, k_status.ToString()));
+}
+
 
 } /// namespace impala
 #endif

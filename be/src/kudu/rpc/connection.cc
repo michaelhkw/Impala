@@ -308,7 +308,7 @@ void Connection::CancelOutboundCall(const shared_ptr<OutboundCall> &call) {
 
 // Inject a cancellation when 'call' is in state 'FLAGS_rpc_inject_cancellation_state'.
 void inline Connection::MaybeInjectCancellation(const shared_ptr<OutboundCall> &call) {
-  if (PREDICT_FALSE(call->ShouldInjectCancellation())) {
+  if (false && PREDICT_FALSE(call->ShouldInjectCancellation())) {
     reactor_thread_->reactor()->messenger()->QueueCancellation(call);
   }
 }
@@ -652,6 +652,11 @@ bool Connection::StartCallTransfer(OutboundTransfer *transfer) {
   // order to ensure that the negotiation has taken place, so that the flags
   // are available.
   DCHECK(negotiation_complete_);
+
+  if (car->call->IsSending()) {
+    return true;
+  }
+
   const set<RpcFeatureFlag>& required_features = car->call->required_rpc_features();
   if (!includes(remote_features_.begin(), remote_features_.end(),
                 required_features.begin(), required_features.end())) {

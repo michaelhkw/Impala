@@ -21,22 +21,32 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/service")
 # where to put generated binaries.
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/service")
 
+KRPC_GENERATE(DATA_STREAM_SVC_PROTO_SRCS DATA_STREAM_SVC_PROTO_HDRS
+  DATA_STREAM_SVC_PROTO_TGTS
+  SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}
+  EXTRA_PROTO_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/../
+  PROTO_FILES data_stream_service.proto)
+
+add_custom_target(data-stream-svc-pb-deps DEPENDS ${DATA_STREAM_SVC_PROTO_TGTS})
+
 add_library(Service
+  child-query.cc
+  client-request-state.cc
+  ${DATA_STREAM_SVC_PROTO_SRCS}
+  data-stream-service.cc
   frontend.cc
   fe-support.cc
   hs2-util.cc
-  impala-server.cc
-  impala-http-handler.cc
-  impala-hs2-server.cc
   impala-beeswax-server.cc
+  impala-hs2-server.cc
+  impala-http-handler.cc
   impala-internal-service.cc
-  client-request-state.cc
+  impalad-main.cc
+  impala-server.cc
   query-options.cc
   query-result-set.cc
-  child-query.cc
-  impalad-main.cc
 )
-add_dependencies(Service thrift-deps)
+add_dependencies(Service gen-deps)
 
 # this shared library provides Impala executor functionality to FE test.
 add_library(fesupport SHARED

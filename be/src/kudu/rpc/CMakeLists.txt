@@ -93,9 +93,7 @@ target_link_libraries(protoc-gen-krpc
     protoc
     protobuf
     gutil
-    kudu_util
-    # Added by Impala: kudu_util depends on libCommon
-    ${IMPALA_LINK_LIBS})
+    kudu_util)
 
 #### RPC test
 PROTOBUF_GENERATE_CPP(

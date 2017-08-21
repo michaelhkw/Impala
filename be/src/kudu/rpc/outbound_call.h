@@ -211,6 +211,8 @@ class OutboundCall {
 
   bool IsOnOutboundQueue() const;
 
+  bool IsSending() const;
+
   // True if the call is scheduled to be sent or in the process of being sent.
   // There is an entry for the call in the OutboundTransfer queue.
   bool IsInTransmission() const;

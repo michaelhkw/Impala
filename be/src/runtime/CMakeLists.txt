@@ -23,6 +23,14 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/runtime")
 # where to put generated binaries
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/runtime")
 
+PROTOBUF_GENERATE_CPP(
+  ROW_BATCH_PROTO_SRCS ROW_BATCH_PROTO_HDRS ROW_BATCH_PROTO_TGTS
+  SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../
+  BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../
+  PROTO_FILES row_batch.proto)
+
+add_custom_target(row-batch-pb-deps DEPENDS ${ROW_BATCH_PROTO_TGTS})
+
 add_library(Runtime
   buffered-tuple-stream.cc
   client-cache.cc
@@ -46,6 +54,7 @@ add_library(Runtime
   initial-reservations.cc
   krpc-data-stream-mgr.cc
   krpc-data-stream-recvr.cc
+  krpc-data-stream-sender.cc
   lib-cache.cc
   mem-tracker.cc
   mem-pool.cc
@@ -58,6 +67,7 @@ add_library(Runtime
   raw-value.cc
   raw-value-ir.cc
   row-batch.cc
+  ${ROW_BATCH_PROTO_SRCS}
   runtime-filter.cc
   runtime-filter-bank.cc
   runtime-filter-ir.cc
@@ -72,7 +82,7 @@ add_library(Runtime
   tuple-row.cc
   tmp-file-mgr.cc
 )
-add_dependencies(Runtime thrift-deps)
+add_dependencies(Runtime gen-deps)
 
 # This test runs forever so should not be part of 'make test'
 add_executable(disk-io-mgr-stress-test disk-io-mgr-stress-test.cc)

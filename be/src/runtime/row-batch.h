@@ -25,10 +25,14 @@
 #include "codegen/impala-ir.h"
 #include "common/compiler-util.h"
 #include "common/logging.h"
+#include "kudu/util/slice.h"
 #include "runtime/bufferpool/buffer-pool.h"
 #include "runtime/descriptors.h"
 #include "runtime/disk-io-mgr.h"
 #include "runtime/mem-pool.h"
+#include "runtime/row_batch.pb.h"
+
+namespace kudu { class Slice; }
 
 namespace impala {
 
@@ -40,6 +44,38 @@ class TRowBatch;
 class Tuple;
 class TupleRow;
 class TupleDescriptor;
+
+/// RowBatch Protobuf
+struct ProtoRowBatch {
+
+  RowBatchHeaderPB header;
+
+  kudu::Slice tuple_offsets;
+
+  kudu::Slice tuple_data;
+
+  int num_rows() const {
+    DCHECK(header.has_num_rows());
+    return header.num_rows();
+  }
+
+  bool IsInitialized() const {
+    return header.IsInitialized();
+  }
+};
+
+/// A cached protobuf row batch
+class CachedProtoRowBatch {
+ public:
+  ProtoRowBatch* proto_batch() { return &proto_batch_; }
+
+ private:
+  friend class RowBatch;
+
+  ProtoRowBatch proto_batch_;
+  vector<int32_t> tuple_offsets_;
+  string tuple_data_;
+};
 
 /// A RowBatch encapsulates a batch of rows, each composed of a number of tuples.
 /// The maximum number of rows is fixed at the time of construction.
@@ -71,6 +107,7 @@ class TupleDescriptor;
 //
 /// A row batch is considered at capacity if all the rows are full or it has accumulated
 /// auxiliary memory up to a soft cap. (See at_capacity_mem_usage_ comment).
+
 class RowBatch {
  public:
   /// Flag indicating whether the resources attached to a RowBatch need to be flushed.
@@ -91,8 +128,12 @@ class RowBatch {
   /// in the data back into pointers.
   /// TODO: figure out how to transfer the data from input_batch to this RowBatch
   /// (so that we don't need to make yet another copy)
-  RowBatch(
-      const RowDescriptor* row_desc, const TRowBatch& input_batch, MemTracker* tracker);
+  RowBatch(const RowDescriptor* row_desc, const TRowBatch& input_batch,
+      MemTracker* tracker);
+
+  /// XXX
+  RowBatch(const RowDescriptor* row_desc, const ProtoRowBatch& input_batch,
+      MemTracker* mem_tracker);
 
   /// Releases all resources accumulated at this row batch.  This includes
   ///  - tuple_ptrs
@@ -300,11 +341,17 @@ class RowBatch {
   /// it is ignored. This function does not Reset().
   Status Serialize(TRowBatch* output_batch);
 
+  /// XXX
+  Status Serialize(CachedProtoRowBatch* buf);
+
   /// Utility function: returns total byte size of a batch in either serialized or
   /// deserialized form. If a row batch is compressed, its serialized size can be much
   /// less than the deserialized size.
   static int64_t GetSerializedSize(const TRowBatch& batch);
   static int64_t GetDeserializedSize(const TRowBatch& batch);
+
+  static int64_t GetSerializedSize(const ProtoRowBatch& batch);
+  static int64_t GetDeserializedSize(const ProtoRowBatch& batch);
 
   int ALWAYS_INLINE num_rows() const { return num_rows_; }
   int ALWAYS_INLINE capacity() const { return capacity_; }
@@ -357,6 +404,18 @@ class RowBatch {
   /// Overload for testing that allows the test to force the deduplication level.
   Status Serialize(TRowBatch* output_batch, bool full_dedup);
 
+  /// XXX
+  Status Serialize(CachedProtoRowBatch* buf, bool full_dedup);
+
+  /// XXX
+  Status Serialize(bool full_dedup, vector<int32_t>* tuple_offsets, string* tuple_data,
+      int64_t* uncompressed_size, THdfsCompression::type* compression_type);
+
+  /// XXX
+  void Deserialize(const kudu::Slice& input_tuple_data,
+      const kudu::Slice& input_tuple_offsets, int64_t uncompressed_size,
+      bool is_compressed);
+
   typedef FixedSizeHashTable<Tuple*, int> DedupMap;
 
   /// The total size of all data represented in this row batch (tuples and referenced
@@ -367,7 +426,7 @@ class RowBatch {
   int64_t TotalByteSize(DedupMap* distinct_tuples);
 
   void SerializeInternal(int64_t size, DedupMap* distinct_tuples,
-      TRowBatch* output_batch);
+      vector<int32_t>* tuple_offsets, string* tuple_data);
 
   /// All members below need to be handled in RowBatch::AcquireState()
 
