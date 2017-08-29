@@ -1654,7 +1654,7 @@ void ImpalaServer::AddLocalBackendToStatestore(
     return;
   }
   local_backend_descriptor.ip_address = ip;
-  if (FLAGS_use_krpc) {
+  if (true || FLAGS_use_krpc) {
     TNetworkAddress krpc_svc_address = MakeNetworkAddress(ip, exec_env_->krpc_port());
     local_backend_descriptor.__set_krpc_svc_address(krpc_svc_address);
   }

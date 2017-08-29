@@ -86,7 +86,7 @@ Status Scheduler::Init(const TNetworkAddress& backend_address, int krpc_port) {
   local_backend_descriptor_.ip_address = ip;
   LOG(INFO) << "Scheduler using " << ip << " as IP address";
 
-  if (FLAGS_use_krpc) {
+  if (true || FLAGS_use_krpc) {
     // KRPC expects address to have been resolved already.
     TNetworkAddress krpc_svc_addr = MakeNetworkAddress(ip, krpc_port);
     local_backend_descriptor_.__set_krpc_svc_address(krpc_svc_addr);
@@ -301,7 +301,7 @@ void Scheduler::ComputeFragmentExecParams(
         dest.__set_fragment_instance_id(dest_params->instance_exec_params[i].instance_id);
         const TNetworkAddress& host = dest_params->instance_exec_params[i].host;
         dest.__set_server(host);
-        if (FLAGS_use_krpc) {
+        if (true || FLAGS_use_krpc) {
           const TBackendDescriptor& desc = LookUpBackendDesc(executor_config, host);
           DCHECK(desc.__isset.krpc_svc_address);
           DCHECK(IsResolvedAddress(desc.krpc_svc_address));
