@@ -74,9 +74,10 @@ bool Sockaddr::operator<(const Sockaddr &rhs) const {
 }
 
 uint32_t Sockaddr::HashCode() const {
-  uint32_t hash = Hash32NumWithSeed(addr_.sin_addr.s_addr, 0);
-  hash = Hash32NumWithSeed(addr_.sin_port, hash);
-  return hash;
+  return ntohl(addr_.sin_addr.s_addr) + addr_.sin_port;
+  //uint32_t hash = Hash32NumWithSeed(addr_.sin_addr.s_addr, 0);
+  //hash = Hash32NumWithSeed(addr_.sin_port, hash);
+  //return hash;
 }
 
 void Sockaddr::set_port(int port) {
