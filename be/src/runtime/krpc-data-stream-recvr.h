@@ -128,7 +128,7 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   /// Takes over the RPC state 'ctx' of an early sender for deferred processing and
   /// kicks off a deserialization task to process it asynchronously. This makes sure
   /// new incoming RPCs won't pass the early senders, leading to starvation.
-  void TakeOverEarlySender(std::unique_ptr<TransmitDataCtx> ctx);
+  void TakeOverEarlySender(std::unique_ptr<TransmitDataCtx> ctx, int64_t arrival_time_ms);
 
   /// Indicate that a particular sender is done. Delegated to the appropriate
   /// sender queue. Called from KrpcDataStreamMgr.
@@ -143,6 +143,9 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   bool ExceedsLimit(int64_t batch_size) {
     return num_buffered_bytes_.Load() + batch_size > total_buffer_limit_;
   }
+
+  /// XXX
+  void DumpDetails(int sender_id);
 
   /// KrpcDataStreamMgr instance used to create this recvr. (Not owned)
   KrpcDataStreamMgr* mgr_;
@@ -195,11 +198,21 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   /// Time series of number of bytes received, samples bytes_received_counter_
   RuntimeProfile::TimeSeriesCounter* bytes_received_time_series_counter_;
 
+  /// Total wall-clock time spent adding row batches, including deserialization time and
+  /// the time blocked waiting for the locks and insertion into the row batch queue.
+  RuntimeProfile::Counter* add_row_batch_timer_;
+
   /// Total wall-clock time spent deserializing row batches.
   RuntimeProfile::Counter* deserialize_row_batch_timer_;
 
   /// Number of senders which arrive before the receiver is ready.
   RuntimeProfile::Counter* num_early_senders_;
+
+  /// XXX
+  RuntimeProfile::Counter* num_closed_senders_;
+  RuntimeProfile::Counter* early_senders_wait_timer_;
+  RuntimeProfile::SummaryStatsCounter* batch_queue_timer_;
+  RuntimeProfile::SummaryStatsCounter* deferred_rpcs_timer_;
 
   /// Time spent waiting until the first batch arrives across all queues.
   /// TODO: Turn this into a wall-clock timer.

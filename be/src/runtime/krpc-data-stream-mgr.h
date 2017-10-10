@@ -50,6 +50,8 @@ class RpcContext;
 namespace impala {
 
 class DescriptorTbl;
+class DumpRecvrRequestPB;
+class DumpRecvrResponsePB;
 class EndDataStreamRequestPB;
 class EndDataStreamResponsePB;
 class KrpcDataStreamRecvr;
@@ -181,9 +183,13 @@ struct TransmitDataCtx {
   /// has been responded to. Not owned.
   kudu::rpc::RpcContext* rpc_context;
 
+  /// XXX
+  int64_t enqueue_time;
+
   TransmitDataCtx(const TransmitDataRequestPB* request, TransmitDataResponsePB* response,
-      kudu::rpc::RpcContext* rpc_context)
-    : request(request), response(response), rpc_context(rpc_context) { }
+      kudu::rpc::RpcContext* rpc_context, int64_t enqueue_time)
+    : request(request), response(response), rpc_context(rpc_context),
+      enqueue_time(enqueue_time) { }
 };
 
 /// Context for an EndDataStream() RPC. This structure is constructed when the RPC is
@@ -286,6 +292,10 @@ class KrpcDataStreamMgr : public DataStreamMgrBase {
   /// receivers will not accept any row batches after being cancelled. Any buffered
   /// row batches will not be freed until Close() is called on the receivers.
   void Cancel(const TUniqueId& fragment_instance_id) override;
+
+  /// XXX
+  void DumpRecvr(const TUniqueId& finst_id, const DumpRecvrRequestPB* request,
+      DumpRecvrResponsePB* response, kudu::rpc::RpcContext* context);
 
   /// Waits for maintenance thread and sender response thread pool to finish.
   ~KrpcDataStreamMgr();
@@ -465,6 +475,10 @@ class KrpcDataStreamMgr : public DataStreamMgrBase {
   /// show up. 'ctx' is the encapsulated RPC request context (e.g. TransmitDataCtx).
   template<typename ContextType, typename RequestPBType>
   void RespondToTimedOutSender(const std::unique_ptr<ContextType>& ctx);
+
+  /// XXX
+  template<typename ContextType, typename RequestPBType>
+  void DumpEarlySenders(const std::unique_ptr<ContextType>& ctx, bool closed);
 
   /// Notifies any sender that has been waiting for its receiver for more than
   /// FLAGS_datastream_sender_timeout_ms.

@@ -109,7 +109,7 @@ shared_ptr<DataStreamRecvrBase> KrpcDataStreamMgr::CreateRecvr(
       // Let the receiver take over the RPC payloads of early senders and process them
       // asynchronously.
       for (unique_ptr<TransmitDataCtx>& ctx : early_senders.waiting_sender_ctxs) {
-        recvr->TakeOverEarlySender(move(ctx));
+        recvr->TakeOverEarlySender(move(ctx), early_senders.arrival_time);
         num_senders_waiting_->Increment(-1);
       }
       for (const unique_ptr<EndDataStreamCtx>& ctx : early_senders.closed_sender_ctxs) {
@@ -151,7 +151,7 @@ void KrpcDataStreamMgr::AddEarlySender(const TUniqueId& finst_id,
     const TransmitDataRequestPB* request, TransmitDataResponsePB* response,
     kudu::rpc::RpcContext* rpc_context) {
   RecvrId recvr_id = make_pair(finst_id, request->dest_node_id());
-  auto payload = make_unique<TransmitDataCtx>(request, response, rpc_context);
+  auto payload = make_unique<TransmitDataCtx>(request, response, rpc_context, 0);
   early_senders_map_[recvr_id].waiting_sender_ctxs.emplace_back(move(payload));
   num_senders_waiting_->Increment(1);
   total_senders_waited_->Increment(1);
@@ -182,6 +182,10 @@ void KrpcDataStreamMgr::AddData(const TransmitDataRequestPB* request,
   {
     lock_guard<mutex> l(lock_);
     recvr = FindRecvr(finst_id, request->dest_node_id(), &already_unregistered);
+
+    // XXX
+    int64_t now = UnixNanos();
+
     // If no receiver is found and it's not in the closed stream cache, best guess is
     // that it is still preparing, so add payload to per-receiver early senders' list.
     // If the receiver doesn't show up after FLAGS_datastream_sender_timeout_ms ms
@@ -191,7 +195,11 @@ void KrpcDataStreamMgr::AddData(const TransmitDataRequestPB* request,
       AddEarlySender(finst_id, request, response, rpc_context);
       return;
     }
+
+    // XXX
+    response->set_add_batch_time_ns(now);
   }
+
   if (already_unregistered) {
     // The receiver may remove itself from the receiver map via DeregisterRecvr() at any
     // time without considering the remaining number of senders. As a consequence,
@@ -200,6 +208,7 @@ void KrpcDataStreamMgr::AddData(const TransmitDataRequestPB* request,
     // already closed deliberately, and there's no unexpected error here.
     Status(TErrorCode::DATASTREAM_RECVR_CLOSED, PrintId(finst_id), dest_node_id)
         .ToProto(response->mutable_status());
+    response->set_reply_time_ns(UnixNanos());
     rpc_context->RespondSuccess();
     return;
   }
@@ -367,6 +376,7 @@ void KrpcDataStreamMgr::Maintenance() {
     // EOS will be lost forever.
     for (const EarlySendersList& senders_queue : timed_out_senders) {
       for (const unique_ptr<TransmitDataCtx>& ctx : senders_queue.waiting_sender_ctxs) {
+        ctx->response->set_reply_time_ns(UnixNanos());
         RespondToTimedOutSender<TransmitDataCtx, TransmitDataRequestPB>(ctx);
       }
       for (const unique_ptr<EndDataStreamCtx>& ctx : senders_queue.closed_sender_ctxs) {
@@ -377,6 +387,55 @@ void KrpcDataStreamMgr::Maintenance() {
     // Wait for 10s
     shutdown_promise_.Get(10000, &timed_out);
     if (!timed_out) return;
+  }
+}
+
+template<typename ContextType, typename RequestPBType>
+void KrpcDataStreamMgr::DumpEarlySenders(const std::unique_ptr<ContextType>& ctx, bool closed) {
+   const RequestPBType* request = ctx->request;
+   TUniqueId finst_id;
+   finst_id.__set_lo(request->dest_fragment_instance_id().lo());
+   finst_id.__set_hi(request->dest_fragment_instance_id().hi());
+   VLOG_QUERY << "XXX: EarlySender: closed=" << closed
+              << " fragment_instance_id_=" << finst_id
+              << " dest_id_=" << request->dest_node_id()
+              << " sender_id_=" << request->sender_id();
+}
+
+void KrpcDataStreamMgr::DumpRecvr(const TUniqueId& finst_id,
+    const DumpRecvrRequestPB* request, DumpRecvrResponsePB* response,
+    kudu::rpc::RpcContext* context) {
+
+  bool already_unregistered = false;
+  lock_guard<mutex> l(lock_);
+  shared_ptr<KrpcDataStreamRecvr> recvr =
+      FindRecvr(finst_id, request->dest_node_id(), &already_unregistered);
+
+  if (recvr != nullptr) {
+    VLOG_QUERY << "XXX: recvr found "
+               << " fragment_instance_id_=" << finst_id
+               << " dest_id_=" << request->dest_node_id()
+               << " sender_id_=" << request->sender_id()
+               << " unregistered=" << already_unregistered;
+    recvr->DumpDetails(request->sender_id());
+  } else {
+    VLOG_QUERY << "XXX: recvr not found "
+               << " fragment_instance_id_=" << finst_id
+               << " dest_id_=" << request->dest_node_id()
+               << " sender_id_=" << request->sender_id()
+               << " unregistered=" << already_unregistered;
+  }
+
+  auto it = early_senders_map_.begin();
+  while (it != early_senders_map_.end()) {
+    const EarlySendersList& senders_list = it->second;
+    for (const auto& ctx : senders_list.waiting_sender_ctxs) {
+      DumpEarlySenders<TransmitDataCtx, TransmitDataRequestPB>(ctx, false);
+    }
+    for (const auto& ctx : senders_list.closed_sender_ctxs) {
+      DumpEarlySenders<EndDataStreamCtx, EndDataStreamRequestPB>(ctx, true);
+    }
+    ++it;
   }
 }
 

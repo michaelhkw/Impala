@@ -23,6 +23,7 @@
 #include <string>
 
 #include "gutil/walltime.h"
+#include "util/os-info.h"
 
 /// Utilities for collecting timings.
 namespace impala {
@@ -34,6 +35,12 @@ namespace impala {
 inline int64_t MonotonicNanos() {
   timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * NANOS_PER_SEC + ts.tv_nsec;
+}
+
+inline int64_t MonotonicNanosFast() {
+  timespec ts;
+  clock_gettime(OsInfo::fast_clock(), &ts);
   return ts.tv_sec * NANOS_PER_SEC + ts.tv_nsec;
 }
 
@@ -63,6 +70,10 @@ inline int64_t UnixMillis() {
 /// above.
 inline int64_t UnixMicros() {
   return GetCurrentTimeMicros();
+}
+
+inline int64_t UnixNanos() {
+  return UnixMicros() * NANOS_PER_MICRO;
 }
 
 /// Sleeps the current thread for at least duration_ms milliseconds.

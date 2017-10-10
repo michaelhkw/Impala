@@ -25,6 +25,7 @@
 
 #include "exec/kudu-util.h"
 #include "kudu/rpc/rpc_context.h"
+#include "kudu/util/monotime.h"
 #include "runtime/krpc-data-stream-recvr.h"
 #include "runtime/krpc-data-stream-mgr.h"
 #include "runtime/mem-tracker.h"
@@ -94,6 +95,9 @@ class KrpcDataStreamRecvr::SenderQueue {
   // Sets cancellation flag and signals cancellation to receiver and sender. Subsequent
   // incoming batches will be dropped and senders in 'deferred_rpcs_' are replied to.
   void Cancel();
+
+  // XXX
+  void DumpDetails(const TUniqueId& finst_id, PlanNodeId dest_node_id);
 
   // Must be called once to cleanup any queued resources.
   void Close();
@@ -185,6 +189,15 @@ KrpcDataStreamRecvr::SenderQueue::SenderQueue(
     KrpcDataStreamRecvr* parent_recvr, int num_senders)
   : recvr_(parent_recvr), num_remaining_senders_(num_senders) { }
 
+void KrpcDataStreamRecvr::SenderQueue::DumpDetails(const TUniqueId& finst_id,
+    PlanNodeId dest_node_id) {
+  VLOG_QUERY << "XXX: recvr details: fragment_instance_id_=" << finst_id
+             << " dest_node_id=" << dest_node_id
+             << " batch_queue_ size=" << batch_queue_.size()
+             << " deferred_rpcs_ size=" << deferred_rpcs_.size()
+             << " num_remaining_senders_=" << num_remaining_senders_;
+}
+
 Status KrpcDataStreamRecvr::SenderQueue::GetBatch(RowBatch** next_batch) {
   SCOPED_TIMER(recvr_->queue_get_batch_time_);
   int num_to_dequeue = 0;
@@ -247,6 +260,12 @@ Status KrpcDataStreamRecvr::SenderQueue::GetBatch(RowBatch** next_batch) {
     VLOG_ROW << "fetched #rows=" << result->num_rows();
     current_batch_.reset(result);
     *next_batch = current_batch_.get();
+
+    // XXX
+    int64_t now = MonotonicNanosFast();
+    int64_t queue_time =  now - result->enqueue_time();
+    DCHECK_GE(queue_time, 0);
+    recvr_->batch_queue_timer_->UpdateCounter(queue_time);
   }
   // Don't hold lock when calling EnqueueDeserializeTask() as it may block.
   // It's important that the dequeuing of 'deferred_rpcs_' is done after the entry
@@ -323,7 +342,12 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
 
 void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* request,
     TransmitDataResponsePB* response, RpcContext* rpc_context) {
-  // TODO: Add timers for time spent in this function and queue time in 'batch_queue_'.
+  // Start time in ns.
+  int64_t start_time_ns = MonotonicNanosFast();
+
+  // Set response time.
+  response->set_add_batch_time_ns(UnixNanos());
+
   const RowBatchHeaderPB& header = request->row_batch_header();
   kudu::Slice tuple_offsets;
   kudu::Slice tuple_data;
@@ -331,6 +355,7 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* req
   Status status = UnpackRequest(request, rpc_context, &tuple_offsets, &tuple_data,
       &batch_size);
   if (UNLIKELY(!status.ok())) {
+    response->set_reply_time_ns(UnixNanos());
     status.ToProto(response->mutable_status());
     rpc_context->RespondSuccess();
     return;
@@ -344,6 +369,7 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* req
     // responded to if we reach here.
     DCHECK_GT(num_remaining_senders_, 0);
     if (UNLIKELY(is_cancelled_)) {
+      response->set_reply_time_ns(UnixNanos());
       Status::OK().ToProto(response->mutable_status());
       rpc_context->RespondSuccess();
       return;
@@ -356,7 +382,8 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* req
     // batch needs to line up after the deferred RPCs to avoid starvation of senders
     // in the non-merging case.
     if (UNLIKELY(!deferred_rpcs_.empty() || !CanEnqueue(batch_size))) {
-      auto payload = make_unique<TransmitDataCtx>(request, response, rpc_context);
+      auto payload =
+          make_unique<TransmitDataCtx>(request, response, rpc_context, MonotonicNanosFast());
       deferred_rpcs_.push(move(payload));
       COUNTER_ADD(recvr_->num_deferred_batches_, 1);
       return;
@@ -364,14 +391,23 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* req
 
     // At this point, we are committed to inserting the row batch into 'batch_queue_'.
     AddBatchWork(batch_size, header, tuple_offsets, tuple_data, &l);
+
+    // Update 'add_row_batch_timer_'.
+    int64_t elapsed_time = MonotonicNanosFast() - start_time_ns;
+    DCHECK_GE(elapsed_time, 0);
+    recvr_->add_row_batch_timer_->Add(elapsed_time);
   }
 
   // Respond to the sender to ack the insertion of the row batches.
+  response->set_reply_time_ns(UnixNanos());
   Status::OK().ToProto(response->mutable_status());
   rpc_context->RespondSuccess();
 }
 
 void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
+  // Start time in ns.
+  int64_t start_time_ns = MonotonicNanosFast();
+
   // Owns the first entry of 'deferred_rpcs_' if it ends up being popped.
   std::unique_ptr<TransmitDataCtx> ctx;
   {
@@ -391,6 +427,7 @@ void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
         &tuple_data, &batch_size);
     // Reply with error status if the entry cannot be unpacked.
     if (UNLIKELY(!status.ok())) {
+      ctx->response->set_reply_time_ns(UnixNanos());
       status.ToProto(ctx->response->mutable_status());
       ctx->rpc_context->RespondSuccess();
       deferred_rpcs_.pop();
@@ -405,6 +442,18 @@ void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
       return;
     }
 
+    // XXX
+    int64_t now = MonotonicNanosFast();
+    ctx->response->set_add_batch_time_ns(UnixNanos());
+    int64_t queue_time = now - ctx->enqueue_time;
+    DCHECK_GE(queue_time, 0);
+    recvr_->deferred_rpcs_timer_->UpdateCounter(queue_time);
+
+    // Update 'add_row_batch_timer_'.
+    int64_t elapsed_time = now - start_time_ns;
+    DCHECK_GE(elapsed_time, 0);
+    recvr_->add_row_batch_timer_->Add(elapsed_time);
+
     // Dequeues the deferred batch and adds it to 'batch_queue_'.
     deferred_rpcs_.pop();
     const RowBatchHeaderPB& header = ctx->request->row_batch_header();
@@ -412,6 +461,7 @@ void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
   }
 
   // Responds to the sender to ack the insertion of the row batches.
+  ctx->response->set_reply_time_ns(UnixNanos());
   Status::OK().ToProto(ctx->response->mutable_status());
   ctx->rpc_context->RespondSuccess();
 }
@@ -438,6 +488,7 @@ void KrpcDataStreamRecvr::SenderQueue::DecrementSenders() {
             << " node_id=" << recvr_->dest_node_id()
             << " #senders=" << num_remaining_senders_;
   if (num_remaining_senders_ == 0) data_arrival_cv_.notify_one();
+  COUNTER_ADD(recvr_->num_closed_senders_, 1);
 }
 
 void KrpcDataStreamRecvr::SenderQueue::Cancel() {
@@ -472,7 +523,6 @@ void KrpcDataStreamRecvr::SenderQueue::Close() {
 
   // Wait for any pending insertion to complete first.
   while (num_pending_enqueue_ > 0) data_arrival_cv_.wait(l);
-
   // Delete any batches queued in batch_queue_
   batch_queue_.clear();
   current_batch_.reset();
@@ -535,16 +585,32 @@ KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
       ADD_COUNTER(recvr_side_profile_, "TotalBytesReceived", TUnit::BYTES);
   bytes_received_time_series_counter_ = ADD_TIME_SERIES_COUNTER(
       recvr_side_profile_, "BytesReceived", bytes_received_counter_);
-  queue_get_batch_time_ = ADD_TIMER(recvr_side_profile_, "TotalGetBatchTime");
+
+  inactive_timer_ = profile_->inactive_timer();
+  batch_queue_timer_ =
+      ADD_SUMMARY_STATS_TIMER(recvr_side_profile_, "BatchQueueTime");
+  queue_get_batch_time_ =
+      ADD_TIMER(recvr_side_profile_, "TotalGetBatchTime");
   data_arrival_timer_ =
       ADD_CHILD_TIMER(recvr_side_profile_, "DataArrivalTimer", "TotalGetBatchTime");
   first_batch_wait_total_timer_ =
       ADD_TIMER(recvr_side_profile_, "FirstBatchArrivalWaitTime");
+
+  add_row_batch_timer_ =
+      ADD_TIMER(sender_side_profile_, "AddRowBatchTime");
   deserialize_row_batch_timer_ =
-      ADD_TIMER(sender_side_profile_, "DeserializeRowBatchTime");
-  inactive_timer_ = profile_->inactive_timer();
+      ADD_TIMER(sender_side_profile_, "DeserializeRowBatchTimer");
+
+  early_senders_wait_timer_ =
+      ADD_TIMER(sender_side_profile_, "EarlySendersWaitTime");
+  deferred_rpcs_timer_ =
+      ADD_SUMMARY_STATS_TIMER(sender_side_profile_, "DeferredRpcTime");
+
+  // XXX
   num_early_senders_ =
       ADD_COUNTER(sender_side_profile_, "NumEarlySenders", TUnit::UNIT);
+  num_closed_senders_ =
+      ADD_COUNTER(sender_side_profile_, "NumClosedSenders", TUnit::UNIT);
   num_deferred_batches_ =
       ADD_COUNTER(sender_side_profile_, "NumBatchesDeferred", TUnit::UNIT);
   num_accepted_batches_ =
@@ -569,11 +635,17 @@ void KrpcDataStreamRecvr::DequeueDeferredRpc(int sender_id) {
   sender_queues_[use_sender_id]->DequeueDeferredRpc();
 }
 
-void KrpcDataStreamRecvr::TakeOverEarlySender(unique_ptr<TransmitDataCtx> ctx) {
+void KrpcDataStreamRecvr::TakeOverEarlySender(unique_ptr<TransmitDataCtx> ctx,
+    int64_t arrival_time_ms) {
   int use_sender_id = is_merging_ ? ctx->request->sender_id() : 0;
   // Add all batches to the same queue if is_merging_ is false.
+  int64_t now = MonotonicNanosFast();
+  ctx->enqueue_time = now;
   sender_queues_[use_sender_id]->TakeOverEarlySender(move(ctx));
   COUNTER_ADD(num_early_senders_, 1);
+  // XXX
+  int64_t wait_time_ns = now - arrival_time_ms * MICROS_PER_MILLI * NANOS_PER_MICRO;
+  COUNTER_ADD(early_senders_wait_timer_, wait_time_ns);
 }
 
 void KrpcDataStreamRecvr::RemoveSender(int sender_id) {
@@ -607,6 +679,11 @@ Status KrpcDataStreamRecvr::GetBatch(RowBatch** next_batch) {
   DCHECK(!is_merging_);
   DCHECK_EQ(sender_queues_.size(), 1);
   return sender_queues_[0]->GetBatch(next_batch);
+}
+
+void KrpcDataStreamRecvr::DumpDetails(int sender_id) {
+  int use_sender_id = is_merging_ ? sender_id : 0;
+  sender_queues_[use_sender_id]->DumpDetails(fragment_instance_id_, dest_node_id_);
 }
 
 } // namespace impala

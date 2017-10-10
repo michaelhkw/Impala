@@ -50,7 +50,8 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, int capacity, MemTracker* mem_
     attached_buffer_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(mem_tracker),
+    enqueue_time_(0) {
   DCHECK(mem_tracker_ != NULL);
   DCHECK_GT(capacity, 0);
   tuple_ptrs_size_ = capacity * num_tuples_per_row_ * sizeof(Tuple*);
@@ -77,7 +78,8 @@ RowBatch::RowBatch(
     attached_buffer_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(mem_tracker),
+    enqueue_time_(0) {
   DCHECK(mem_tracker_ != nullptr);
   kudu::Slice tuple_data =
       kudu::Slice(input_batch.tuple_data.c_str(), input_batch.tuple_data.size());
@@ -111,6 +113,7 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header
       << "Unexpected compression type: " << compression_type;
   Deserialize(tuple_offsets, tuple_data, header.uncompressed_size(),
       compression_type == CompressionType::LZ4);
+  enqueue_time_ = MonotonicNanosFast();
 }
 
 void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,

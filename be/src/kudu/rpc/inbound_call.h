@@ -61,6 +61,10 @@ struct InboundCallTiming {
   MonoDelta TotalDuration() const {
     return time_completed - time_received;
   }
+
+  MonoDelta QueueTime() const {
+    return time_handled - time_received;
+  }
 };
 
 // Inbound call on server

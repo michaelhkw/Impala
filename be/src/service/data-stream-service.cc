@@ -26,6 +26,8 @@
 #include "runtime/row-batch.h"
 #include "testutil/fault-injection-util.h"
 
+#include "util/time.h"
+
 #include "gen-cpp/data_stream_service.pb.h"
 
 #include "common/names.h"
@@ -47,7 +49,19 @@ void DataStreamService::TransmitData(const TransmitDataRequestPB* request,
     TransmitDataResponsePB* response, RpcContext* rpc_context) {
   FAULT_INJECTION_RPC_DELAY(RPC_TRANSMITDATA);
   // AddData() is guaranteed to eventually respond to this RPC so we don't do it here.
+  response->set_arrival_time_ns(UnixNanos());
   ExecEnv::GetInstance()->KrpcStreamMgr()->AddData(request, response, rpc_context);
+}
+
+void DataStreamService::DumpRecvr(const DumpRecvrRequestPB* request,
+    DumpRecvrResponsePB* response, RpcContext* context) {
+  TUniqueId finst_id;
+  finst_id.__set_lo(request->dest_fragment_instance_id().lo());
+  finst_id.__set_hi(request->dest_fragment_instance_id().hi());
+
+  ExecEnv::GetInstance()->KrpcStreamMgr()->DumpRecvr(finst_id, request,
+      response, context);
+  context->RespondSuccess();
 }
 
 }

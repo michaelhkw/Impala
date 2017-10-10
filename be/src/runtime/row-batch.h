@@ -178,6 +178,9 @@ class RowBatch {
 
   void ALWAYS_INLINE CommitLastRow() { CommitRows(1); }
 
+  /// XXX
+  int64_t ALWAYS_INLINE enqueue_time() { return enqueue_time_; }
+
   /// Set function can be used to reduce the number of rows in the batch. This is only
   /// used in the limit case where more rows were added than necessary.
   void set_num_rows(int num_rows) {
@@ -501,6 +504,14 @@ class RowBatch {
   const RowDescriptor* row_desc_;
 
   MemTracker* mem_tracker_;  // not owned
+
+  /// XXX
+  int64_t enqueue_time_ = 0;
+
+  /// IO buffers current owned by this row batch. Ownership of IO buffers transfer
+  /// between row batches. Any IO buffer will be owned by at most one row batch
+  /// (i.e. they are not ref counted) so most row batches don't own any.
+  std::vector<std::unique_ptr<DiskIoMgr::BufferDescriptor>> io_buffers_;
 
   struct BufferInfo {
     BufferPool::ClientHandle* client;

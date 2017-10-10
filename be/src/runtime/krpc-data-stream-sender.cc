@@ -44,6 +44,7 @@
 #include "util/aligned-new.h"
 #include "util/debug-util.h"
 #include "util/network-util.h"
+#include "util/time.h"
 
 #include "gen-cpp/data_stream_service.pb.h"
 #include "gen-cpp/data_stream_service.proxy.h"
@@ -58,6 +59,8 @@ using kudu::rpc::RpcSidecar;
 using kudu::MonoDelta;
 
 DECLARE_int32(rpc_retry_interval_ms);
+
+DEFINE_int32(krpc_stuck_timeout_ms, 60 * 60 * 1000, "XXX");
 
 namespace impala {
 
@@ -222,6 +225,9 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // TODO: Fix IMPALA-3990
   bool remote_recvr_closed_ = false;
 
+  // XXX
+  int64_t start_time_ns_ = 0;
+
   // Returns true if the channel should terminate because the parent sender
   // has been closed or cancelled.
   bool ShouldTerminate() const { return shutdown_ || parent_->state_->is_cancelled(); }
@@ -250,6 +256,9 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // shut down. Returns OK otherwise. This should be only called from a fragment
   // executor thread.
   Status WaitForRpc(std::unique_lock<SpinLock>* lock);
+
+  /// XXX
+  Status DumpRemoteStatus();
 
   // A callback function called from KRPC reactor thread to retry an RPC which failed
   // previously due to remote server being too busy. This will re-arm the request
@@ -302,6 +311,8 @@ Status KrpcDataStreamSender::Channel::Init(RuntimeState* state) {
   // Create a DataStreamService proxy to the destination.
   RpcMgr* rpc_mgr = ExecEnv::GetInstance()->rpc_mgr();
   RETURN_IF_ERROR(rpc_mgr->GetProxy(address_, &proxy_));
+
+  // Initialize some constant fields in the request protobuf.
   return Status::OK();
 }
 
@@ -312,15 +323,50 @@ void KrpcDataStreamSender::Channel::MarkDone(const Status& status) {
   rpc_done_cv_.notify_one();
 }
 
+Status KrpcDataStreamSender::Channel::DumpRemoteStatus() {
+  // Create a DataStreamService proxy to the destination.
+  RpcMgr* rpc_mgr = ExecEnv::GetInstance()->rpc_mgr();
+  std::unique_ptr<DataStreamServiceProxy> proxy;
+  RETURN_IF_ERROR(rpc_mgr->GetProxy(address_, &proxy));
+
+  RpcController rpc_controller;
+  DumpRecvrRequestPB req;
+  DumpRecvrResponsePB resp;
+
+  UniqueIdPB* finstance_id_pb = req.mutable_dest_fragment_instance_id();
+  finstance_id_pb->set_lo(fragment_instance_id_.lo);
+  finstance_id_pb->set_hi(fragment_instance_id_.hi);
+  req.set_sender_id(parent_->sender_id_);
+  req.set_dest_node_id(dest_node_id_);
+  KUDU_RETURN_IF_ERROR(proxy->DumpRecvr(req, &resp, &rpc_controller), "XXX");
+  return Status::OK();
+}
+
+#define TIMEOUT_PERIOD_COUNT   (FLAGS_krpc_stuck_timeout_ms / 50)
+
 Status KrpcDataStreamSender::Channel::WaitForRpc(std::unique_lock<SpinLock>* lock) {
   DCHECK(lock != nullptr);
   DCHECK(lock->owns_lock());
 
   SCOPED_TIMER(parent_->state_->total_network_send_timer());
-
+  int64_t count = 0;
   // Wait for in-flight RPCs to complete unless the parent sender is closed or cancelled.
   while(rpc_in_flight_ && !ShouldTerminate()) {
     rpc_done_cv_.wait_for(*lock, std::chrono::milliseconds(50));
+    if ((++count % TIMEOUT_PERIOD_COUNT) == 0) {
+      // log the destination
+      LOG(WARNING) << "XXX: WaitForRPC() stuck for too long"
+                   << " address=" << address_
+                   << " fragment_instace_id_=" <<  fragment_instance_id_
+                   << " dest_node_id_=" << dest_node_id_
+                   << " sender_id_=" << parent_->sender_id_;
+      lock->unlock();
+      Status status = DumpRemoteStatus();
+      if (UNLIKELY(!status.ok())) {
+        VLOG_QUERY << "Failed to dump remote status";
+      }
+      lock->lock();
+    }
   }
 
   if (UNLIKELY(ShouldTerminate())) {
@@ -391,6 +437,26 @@ void KrpcDataStreamSender::Channel::TransmitDataCompleteCb() {
     } else {
       rpc_status = Status(resp_.status());
     }
+
+    // XXX
+    {
+      int64_t now = UnixNanos();
+
+      int64_t arrival_time = resp_.arrival_time_ns();
+      int64_t send_time = arrival_time - start_time_ns_;
+      if (send_time > 0) {
+        COUNTER_ADD(parent_->to_send_timer_, send_time);
+
+        int64_t reply_time = now - resp_.reply_time_ns();
+        if (reply_time > 0) COUNTER_ADD(parent_->from_send_timer_, reply_time);
+        
+        int64_t queue_time = resp_.add_batch_time_ns() - resp_.arrival_time_ns();
+        if (queue_time > 0) COUNTER_ADD(parent_->recvr_queue_timer_, queue_time);
+
+        int64_t add_batch_time = resp_.reply_time_ns() - resp_.add_batch_time_ns();
+        if (add_batch_time > 0) COUNTER_ADD(parent_->recvr_add_batch_timer_, add_batch_time);
+      }
+    }
     MarkDone(rpc_status);
   } else {
     DoRpcFn rpc_fn =
@@ -432,6 +498,8 @@ Status KrpcDataStreamSender::Channel::DoTransmitDataRpc() {
   req.set_tuple_data_sidecar_idx(sidecar_idx);
 
   resp_.Clear();
+  // XXX
+  start_time_ns_ = UnixNanos();
   proxy_->TransmitDataAsync(req, &resp_, &rpc_controller_,
       boost::bind(&KrpcDataStreamSender::Channel::TransmitDataCompleteCb, this));
   // 'req' took ownership of 'header'. Need to release its ownership or 'header' will be
@@ -629,6 +697,12 @@ Status KrpcDataStreamSender::Prepare(
       profile()->AddDerivedCounter("OverallThroughput", TUnit::BYTES_PER_SECOND,
            bind<int64_t>(&RuntimeProfile::UnitsPerSecond, bytes_sent_counter_,
                          profile()->total_time_counter()));
+
+  // XXX
+  to_send_timer_ = ADD_TIMER(profile(), "SendNetworkTime");
+  recvr_queue_timer_ = ADD_TIMER(profile(), "QueueTime");
+  recvr_add_batch_timer_ = ADD_TIMER(profile(), "AddBatchTime");
+  from_send_timer_ = ADD_TIMER(profile(), "ReplyNetworkTime");
   for (int i = 0; i < channels_.size(); ++i) {
     RETURN_IF_ERROR(channels_[i]->Init(state));
   }

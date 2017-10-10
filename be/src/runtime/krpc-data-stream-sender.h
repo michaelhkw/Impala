@@ -153,6 +153,12 @@ class KrpcDataStreamSender : public DataSink {
   std::vector<ScalarExpr*> partition_exprs_;
   std::vector<ScalarExprEvaluator*> partition_expr_evals_;
 
+  // XXX
+  RuntimeProfile::Counter* to_send_timer_ = nullptr;
+  RuntimeProfile::Counter* recvr_queue_timer_ = nullptr;
+  RuntimeProfile::Counter* recvr_add_batch_timer_ = nullptr;
+  RuntimeProfile::Counter* from_send_timer_ = nullptr;
+
   /// Time for serializing row batches.
   RuntimeProfile::Counter* serialize_batch_timer_ = nullptr;
 

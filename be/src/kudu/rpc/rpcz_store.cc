@@ -225,6 +225,7 @@ void RpczStore::DumpPB(const DumpRpczStoreRequestPB& req,
 
 void RpczStore::LogTrace(InboundCall* call) {
   int duration_ms = call->timing().TotalDuration().ToMilliseconds();
+  int queue_time_ms = call->timing().QueueTime().ToMilliseconds();
 
   if (call->header_.has_timeout_millis() && call->header_.timeout_millis() > 0) {
     double log_threshold = call->header_.timeout_millis() * 0.75f;
@@ -245,8 +246,8 @@ void RpczStore::LogTrace(InboundCall* call) {
     LOG(INFO) << call->ToString() << " took " << duration_ms << "ms. Trace:";
     call->trace()->Dump(&LOG(INFO), true);
   } else if (duration_ms > 1000) {
-    LOG(INFO) << call->ToString() << " took " << duration_ms << "ms. "
-              << "Request Metrics: " << call->trace()->MetricsAsJSON();
+    LOG(INFO) << call->ToString() << " took " << duration_ms << "ms to execute"
+              << " and " << queue_time_ms << "ms in queue.";
   }
 }
 
