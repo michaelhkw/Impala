@@ -334,6 +334,53 @@ void ValidateOpenClose(
   }
 }
 
+// This UDF is designed to always fail during prepare to make sure clean up is done
+// properly after failure in prepare.
+void BadExprPrepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+  if (scope == FunctionContext::FRAGMENT_LOCAL) {
+    int32_t* state = reinterpret_cast<int32_t*>(context->Allocate(sizeof(int32_t)));
+    *state = 0xf001cafe;
+    context->SetFunctionState(scope, state);
+  }
+  context->SetError("BadExpr prepare error");
+}
+
+// This UDF is designed to fail for cloned evaluators to exercise IMPALA-6184.
+// It does so by detecting whether the caller is a cloned evaluator and inserts an error
+// in FunctionContext if that's the case.
+void BadExpr2Prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+  if (scope == FunctionContext::FRAGMENT_LOCAL) {
+    int32_t* state = reinterpret_cast<int32_t*>(context->Allocate(sizeof(int32_t)));
+    *state = 0xf001cafe;
+    context->SetFunctionState(scope, state);
+    // Set the thread local state too to differentiate from cloned evaluators.
+    context->SetFunctionState(FunctionContext::THREAD_LOCAL, state);
+  } else {
+    if (context->GetFunctionState(FunctionContext::THREAD_LOCAL) == nullptr) {
+      context->SetError("BadExpr2 prepare error");
+    }
+  }
+}
+
+BooleanVal BadExpr(FunctionContext* context, const DoubleVal& slot) {
+  if (slot.is_null) return BooleanVal(false);
+  int64_t val = std::round(slot.val);
+  if ((val % 10) == 0) {
+    context->SetError("BadExpr error");
+    return BooleanVal(false);
+  }
+  return BooleanVal(true);
+}
+
+void BadExprClose(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+  if (scope == FunctionContext::FRAGMENT_LOCAL) {
+    int32_t* state = reinterpret_cast<int32_t*>(context->GetFunctionState(scope));
+    assert(*state == 0xf001cafe);
+    context->Free(reinterpret_cast<uint8_t*>(state));
+    context->SetFunctionState(scope, nullptr);
+  }
+}
+
 // MemTest UDF: "Allocates" the specified number of bytes per call.
 void MemTestPrepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
   if (scope == FunctionContext::THREAD_LOCAL) {
