@@ -57,7 +57,7 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, int capacity, MemTracker* mem_
   DCHECK_GT(tuple_ptrs_size_, 0);
   // TODO: switch to Init() pattern so we can check memory limit and return Status.
   mem_tracker_->Consume(tuple_ptrs_size_);
-  tuple_ptrs_ = reinterpret_cast<Tuple**>(malloc(tuple_ptrs_size_));
+  tuple_ptrs_ = reinterpret_cast<Tuple**>(calloc(1, tuple_ptrs_size_));
   DCHECK(tuple_ptrs_ != NULL);
 }
 

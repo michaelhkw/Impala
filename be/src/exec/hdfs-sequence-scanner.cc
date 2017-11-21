@@ -220,7 +220,7 @@ Status HdfsSequenceScanner::ProcessDecompressedBlock(RowBatch* row_batch) {
   TupleRow* tuple_row = row_batch->GetRow(row_batch->AddRow());
   if (scan_node_->materialized_slots().empty()) {
     // Handle case where there are no slots to materialize (e.g. count(*))
-    num_to_process = WriteTemplateTuples(tuple_row, num_to_process);
+    num_to_process = WriteEmptyProjection(tuple_row, num_to_process);
     COUNTER_ADD(scan_node_->rows_read_counter(), num_to_process);
     RETURN_IF_ERROR(CommitRows(num_to_process, row_batch));
     return Status::OK();
@@ -341,7 +341,7 @@ Status HdfsSequenceScanner::ProcessRange(RowBatch* row_batch) {
         }
       }
     } else {
-      add_row = WriteTemplateTuples(tuple_row_mem, 1);
+      add_row = WriteEmptyProjection(tuple_row_mem, 1) > 0;
     }
     num_rows_read++;
     if (add_row) RETURN_IF_ERROR(CommitRows(1, row_batch));

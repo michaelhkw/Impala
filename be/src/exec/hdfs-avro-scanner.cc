@@ -538,7 +538,7 @@ Status HdfsAvroScanner::ProcessRange(RowBatch* row_batch) {
     int num_to_commit;
     if (scan_node_->materialized_slots().empty()) {
       // No slots to materialize (e.g. count(*)), no need to decode data
-      num_to_commit = WriteTemplateTuples(tuple_row, max_tuples);
+      num_to_commit = WriteEmptyProjection(tuple_row, max_tuples);
     } else if (codegend_decode_avro_data_ != nullptr) {
       num_to_commit = codegend_decode_avro_data_(this, max_tuples,
           row_batch->tuple_data_pool(), &data_block_, data_block_end_, tuple, tuple_row);
