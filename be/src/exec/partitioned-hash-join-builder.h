@@ -271,12 +271,6 @@ class PhjBuilder : public DataSink {
     return spillable_buffer_size_ * (num_reserved_buffers - 2) + max_row_buffer_size_ * 2;
   }
 
- protected:
-  /// Init() function inherited from DataSink. Overridden to be a no-op for now.
-  /// TODO: Merge with InitExprsAndFilters() once this class becomes a true data sink.
-  virtual Status Init(const std::vector<TExpr>& thrift_output_exprs,
-      const TDataSink& tsink, RuntimeState* state) override;
-
  private:
   /// Create and initialize a set of hash partitions for partitioning level 'level'.
   /// The previous hash partitions must have been cleared with ClearHashPartitions().

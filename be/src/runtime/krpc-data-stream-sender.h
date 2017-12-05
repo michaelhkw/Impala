@@ -61,7 +61,7 @@ class KrpcDataStreamSender : public DataSink {
   KrpcDataStreamSender(int sender_id, const RowDescriptor* row_desc,
       const TDataStreamSink& tsink,
       const std::vector<TPlanFragmentDestination>& destinations,
-      int per_channel_buffer_size);
+      int per_channel_buffer_size, RuntimeState* state);
 
   virtual ~KrpcDataStreamSender();
 

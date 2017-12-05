@@ -54,7 +54,7 @@ class TInsertStats;
 /// Close() is called to release any resources before destroying the sink.
 class DataSink {
  public:
-  DataSink(const RowDescriptor* row_desc);
+  DataSink(const RowDescriptor* row_desc, const string& name, RuntimeState* state);
   virtual ~DataSink();
 
   /// Return the name to use in profiles, etc.
@@ -112,8 +112,8 @@ class DataSink {
   /// plan tree, which feeds into this sink.
   const RowDescriptor* row_desc_;
 
-  /// The runtime profile for this DataSink. Initialized in Prepare(). Not owned.
-  RuntimeProfile* profile_;
+  /// The runtime profile for this DataSink. Initialized in ctor. Not owned.
+  RuntimeProfile* profile_ = nullptr;
 
   /// The MemTracker for all allocations made by the DataSink. Initialized in Prepare().
   boost::scoped_ptr<MemTracker> mem_tracker_;

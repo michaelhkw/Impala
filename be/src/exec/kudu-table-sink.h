@@ -53,7 +53,8 @@ namespace impala {
 /// status. All reported errors (ignored or not) will be logged via the RuntimeState.
 class KuduTableSink : public DataSink {
  public:
-  KuduTableSink(const RowDescriptor* row_desc, const TDataSink& tsink);
+  KuduTableSink(const RowDescriptor* row_desc, const TDataSink& tsink,
+      RuntimeState* state);
 
   virtual std::string GetName() { return "KuduTableSink"; }
 

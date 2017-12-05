@@ -328,8 +328,8 @@ void DataStreamSender::Channel::Teardown(RuntimeState* state) {
 
 DataStreamSender::DataStreamSender(int sender_id, const RowDescriptor* row_desc,
     const TDataStreamSink& sink, const vector<TPlanFragmentDestination>& destinations,
-    int per_channel_buffer_size)
-  : DataSink(row_desc),
+    int per_channel_buffer_size, RuntimeState* state)
+  : DataSink(row_desc, GetName(), state),
     sender_id_(sender_id),
     partition_type_(sink.output_partition.type),
     current_channel_idx_(0),

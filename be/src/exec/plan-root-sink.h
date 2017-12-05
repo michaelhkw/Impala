@@ -56,7 +56,7 @@ class ScalarExprEvaluator;
 /// and consumer. See IMPALA-4268.
 class PlanRootSink : public DataSink {
  public:
-  PlanRootSink(const RowDescriptor* row_desc);
+  PlanRootSink(const RowDescriptor* row_desc, RuntimeState* state);
 
   virtual std::string GetName() { return NAME; }
 

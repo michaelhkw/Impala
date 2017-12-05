@@ -34,7 +34,8 @@ namespace impala {
 
 const string PlanRootSink::NAME = "PLAN_ROOT_SINK";
 
-PlanRootSink::PlanRootSink(const RowDescriptor* row_desc) : DataSink(row_desc) {}
+PlanRootSink::PlanRootSink(const RowDescriptor* row_desc, RuntimeState* state)
+  : DataSink(row_desc, GetName(), state) {}
 
 namespace {
 
