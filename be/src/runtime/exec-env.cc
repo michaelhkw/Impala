@@ -100,6 +100,7 @@ DECLARE_string(buffer_pool_clean_pages_limit);
 DECLARE_int64(min_buffer_size);
 DECLARE_bool(is_coordinator);
 DECLARE_int32(webserver_port);
+DECLARE_int64(tcmalloc_max_total_thread_cache_bytes);
 
 // TODO: Remove the following RM-related flags in Impala 3.0.
 DEFINE_bool_hidden(enable_rm, false, "Deprecated");
@@ -234,6 +235,22 @@ Status ExecEnv::Init() {
   }
   RETURN_IF_ERROR(async_rpc_pool_->Init());
 
+  // Resolve hostname to IP address.
+  RETURN_IF_ERROR(HostnameToIpAddr(backend_address_.hostname, &ip_address_));
+
+  // Initialize the RPCMgr before allowing services registration.
+  if (FLAGS_use_krpc) {
+    krpc_address_.__set_hostname(ip_address_);
+    RETURN_IF_ERROR(KrpcStreamMgr()->Init());
+    RETURN_IF_ERROR(rpc_mgr_->Init());
+    unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get()));
+    int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
+        FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
+    RETURN_IF_ERROR(rpc_mgr_->RegisterService(num_svc_threads,
+        FLAGS_datastream_service_queue_depth, move(data_svc)));
+    FLAGS_tcmalloc_max_total_thread_cache_bytes = 1 << 30;
+  }
+
   // Initialize global memory limit.
   // Depending on the system configuration, we will have to calculate the process
   // memory limit either based on the available physical memory, or if overcommitting
@@ -270,6 +287,22 @@ Status ExecEnv::Init() {
           "bytes value or percentage: $0", FLAGS_mem_limit));
   }
 
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
+  // Aggressive decommit is required so that unused pages in the TCMalloc page heap are
+  // not backed by physical pages and do not contribute towards memory consumption.
+  if (!MallocExtension::instance()->SetNumericProperty(
+          "tcmalloc.aggressive_memory_decommit", 1)) {
+    return Status("Failed to enable TCMalloc aggressive decommit.");
+  }
+  // Change the total TCMalloc thread caches size if necessary.
+  if (FLAGS_tcmalloc_max_total_thread_cache_bytes > 0 &&
+      !MallocExtension::instance()->SetNumericProperty(
+          "tcmalloc.max_total_thread_cache_bytes",
+          FLAGS_tcmalloc_max_total_thread_cache_bytes)) {
+    return Status("Failed to change TCMalloc total thread caches size.");
+  }
+#endif
+
   if (!BitUtil::IsPowerOf2(FLAGS_min_buffer_size)) {
     return Status(Substitute(
         "--min_buffer_size must be a power-of-two: $0", FLAGS_min_buffer_size));
@@ -296,21 +329,6 @@ Status ExecEnv::Init() {
   RETURN_IF_ERROR(RegisterMemoryMetrics(
       metrics_.get(), true, buffer_reservation_.get(), buffer_pool_.get()));
 
-  // Resolve hostname to IP address.
-  RETURN_IF_ERROR(HostnameToIpAddr(backend_address_.hostname, &ip_address_));
-
-  // Initialize the RPCMgr before allowing services registration.
-  if (FLAGS_use_krpc) {
-    krpc_address_.__set_hostname(ip_address_);
-    RETURN_IF_ERROR(KrpcStreamMgr()->Init());
-    RETURN_IF_ERROR(rpc_mgr_->Init());
-    unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get()));
-    int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
-        FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
-    RETURN_IF_ERROR(rpc_mgr_->RegisterService(num_svc_threads,
-        FLAGS_datastream_service_queue_depth, move(data_svc)));
-  }
-
   mem_tracker_.reset(
       new MemTracker(AggregateMemoryMetrics::TOTAL_USED, bytes_limit, "Process"));
   // Add BufferPool MemTrackers for cached memory that is not tracked against queries
@@ -328,14 +346,6 @@ Status ExecEnv::Init() {
   obj_pool_->Add(new MemTracker(negated_unused_reservation, -1,
       "Buffer Pool: Unused Reservation", mem_tracker_.get()));
 #if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
-  // Aggressive decommit is required so that unused pages in the TCMalloc page heap are
-  // not backed by physical pages and do not contribute towards memory consumption.
-  size_t aggressive_decommit_enabled = 0;
-  MallocExtension::instance()->GetNumericProperty(
-      "tcmalloc.aggressive_memory_decommit", &aggressive_decommit_enabled);
-  if (!aggressive_decommit_enabled) {
-    return Status("TCMalloc aggressive decommit is required but is disabled.");
-  }
   // A MemTracker for TCMalloc overhead which is the difference between the physical bytes
   // reserved (TcmallocMetric::PHYSICAL_BYTES_RESERVED) and the bytes in use
   // (TcmallocMetrics::BYTES_IN_USE). This overhead accounts for all the cached freelists

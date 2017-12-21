@@ -78,6 +78,9 @@ DEFINE_bool(enable_process_lifetime_heap_profiling, false, "(Advanced) Enables h
 DEFINE_string(heap_profile_dir, "", "Output directory to store heap profiles. If not set "
     " profiles are stored in the current working directory.");
 
+DEFINE_int64(tcmalloc_max_total_thread_cache_bytes, 0, "Bound on the total amount "
+    " of bytes allocated to  thread caches. Default to the default value in TCMalloc.");
+
 DEFINE_bool(abort_on_config_error, true, "Abort Impala startup if there are improper "
     "configs or running on unsupported hardware.");
 
