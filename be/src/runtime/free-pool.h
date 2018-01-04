@@ -19,6 +19,7 @@
 #ifndef IMPALA_RUNTIME_FREE_POOL_H
 #define IMPALA_RUNTIME_FREE_POOL_H
 
+#include <mutex>
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -29,6 +30,7 @@
 #include "gutil/dynamic_annotations.h"
 #include "runtime/mem-pool.h"
 #include "util/bit-util.h"
+#include "util/spinlock.h"
 
 DECLARE_bool(disable_mem_pools);
 
@@ -62,6 +64,7 @@ class FreePool {
     DCHECK_GE(requested_size, 0);
     /// Return a non-nullptr dummy pointer. nullptr is reserved for failures.
     if (UNLIKELY(requested_size == 0)) return mem_pool_->EmptyAllocPtr();
+    std::unique_lock<SpinLock> l(lock_);
     ++net_allocations_;
     if (FLAGS_disable_mem_pools) {
       return reinterpret_cast<uint8_t*>(malloc(requested_size));
@@ -102,6 +105,7 @@ class FreePool {
 
   void Free(uint8_t* ptr) {
     if (UNLIKELY(ptr == nullptr || ptr == mem_pool_->EmptyAllocPtr())) return;
+    std::unique_lock<SpinLock> l(lock_);
     --net_allocations_;
     if (FLAGS_disable_mem_pools) {
       free(ptr);
@@ -136,6 +140,7 @@ class FreePool {
     if (FLAGS_disable_mem_pools) {
       return reinterpret_cast<uint8_t*>(realloc(reinterpret_cast<void*>(ptr), size));
     }
+    std::unique_lock<SpinLock> l(lock_);
     FreeListNode* node = reinterpret_cast<FreeListNode*>(ptr - sizeof(FreeListNode));
     FreeListNode* list = node->list;
 #ifndef NDEBUG
@@ -233,6 +238,9 @@ class FreePool {
   /// While it doesn't make too much sense to use this for very small (e.g. 8 byte)
   /// allocations, it makes the indexing easy.
   FreeListNode lists_[NUM_LISTS];
+
+  /// XXX
+  SpinLock lock_;
 
 #ifdef ADDRESS_SANITIZER
   // For ASAN only: keep track of used bytes for each allocation (not including

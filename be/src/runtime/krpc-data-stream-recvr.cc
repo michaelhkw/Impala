@@ -27,7 +27,6 @@
 #include "kudu/rpc/rpc_context.h"
 #include "runtime/krpc-data-stream-recvr.h"
 #include "runtime/krpc-data-stream-mgr.h"
-#include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/sorted-run-merger.h"
 #include "util/runtime-profile-counters.h"
@@ -310,7 +309,7 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
     // handle deleting any unconsumed batches from batch_queue_. Close() cannot proceed
     // until there are no pending insertion to batch_queue_.
     batch.reset(new RowBatch(recvr_->row_desc(), header, tuple_offsets, tuple_data,
-        recvr_->mem_tracker()));
+        recvr_->free_pool()));
   }
   lock->lock();
 
@@ -516,10 +515,12 @@ KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
     row_desc_(row_desc),
     is_merging_(is_merging),
     num_buffered_bytes_(0),
+    mem_tracker_(-1, "KrpcDataStreamRecvr", parent_tracker),
+    mem_pool_(&mem_tracker_),
+    free_pool_(&mem_pool_),
     profile_(profile),
     recvr_side_profile_(profile_->CreateChild("RecvrSide")),
     sender_side_profile_(profile_->CreateChild("SenderSide")) {
-  mem_tracker_.reset(new MemTracker(-1, "KrpcDataStreamRecvr", parent_tracker));
   // Create one queue per sender if is_merging is true.
   int num_queues = is_merging ? num_senders : 1;
   sender_queues_.reserve(num_queues);
@@ -595,7 +596,8 @@ void KrpcDataStreamRecvr::Close() {
   mgr_ = nullptr;
   for (auto& queue: sender_queues_) queue->Close();
   merger_.reset();
-  mem_tracker_->Close();
+  mem_pool_.FreeAll();
+  mem_tracker_.Close();
   recvr_side_profile_->StopPeriodicCounters();
 }
 

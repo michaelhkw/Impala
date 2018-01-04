@@ -22,6 +22,7 @@
 #include <boost/scoped_ptr.hpp>
 
 #include "runtime/exec-env.h"
+#include "runtime/free-pool.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/string-value.h"
 #include "runtime/tuple-row.h"
@@ -89,32 +90,33 @@ RowBatch::RowBatch(
       compression_type == THdfsCompression::LZ4)
       << "Unexpected compression type: " << input_batch.compression_type;
   Deserialize(tuple_offsets, tuple_data, input_batch.uncompressed_size,
-      compression_type == THdfsCompression::LZ4);
+      compression_type == THdfsCompression::LZ4, nullptr);
 }
 
 RowBatch::RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
     const kudu::Slice& tuple_offsets, const kudu::Slice& tuple_data,
-    MemTracker* mem_tracker)
+    FreePool* free_pool)
   : num_rows_(header.num_rows()),
     capacity_(header.num_rows()),
     flush_(FlushMode::NO_FLUSH_RESOURCES),
     needs_deep_copy_(false),
     num_tuples_per_row_(header.num_tuples_per_row()),
     attached_buffer_bytes_(0),
-    tuple_data_pool_(mem_tracker),
+    tuple_data_pool_(free_pool->mem_tracker()),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(free_pool->mem_tracker()) {
   DCHECK(mem_tracker_ != nullptr);
   const CompressionType& compression_type = header.compression_type();
   DCHECK(compression_type == CompressionType::NONE ||
       compression_type == CompressionType::LZ4)
       << "Unexpected compression type: " << compression_type;
   Deserialize(tuple_offsets, tuple_data, header.uncompressed_size(),
-      compression_type == CompressionType::LZ4);
+      compression_type == CompressionType::LZ4, free_pool);
 }
 
 void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
-    const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed) {
+    const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed,
+    FreePool* free_pool) {
   // TODO: switch to Init() pattern so we can check memory limit and return Status.
   DCHECK_EQ(num_tuples_per_row_, row_desc_->tuple_descriptors().size());
   tuple_ptrs_size_ = num_rows_ * num_tuples_per_row_ * sizeof(Tuple*);
@@ -136,13 +138,24 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
         MakeScopeExitTrigger([&decompressor]() { decompressor.Close(); });
 
     DCHECK_NE(uncompressed_size, -1) << "RowBatch decompression failed";
-    tuple_data = tuple_data_pool_.Allocate(uncompressed_size);
+    if (free_pool != nullptr) {
+      tuple_data = free_pool->Allocate(uncompressed_size);
+      free_pool_data_.emplace_back(free_pool, tuple_data);
+    } else {
+      tuple_data = tuple_data_pool_.Allocate(uncompressed_size);
+    }
     status = decompressor.ProcessBlock(
         true, compressed_size, compressed_data, &uncompressed_size, &tuple_data);
     DCHECK(status.ok()) << "RowBatch decompression failed.";
   } else {
+    size_t tuple_data_size = input_tuple_data.size();
     // Tuple data uncompressed, copy directly into data pool
-    tuple_data = tuple_data_pool_.Allocate(input_tuple_data.size());
+    if (free_pool != nullptr) {
+      tuple_data = free_pool->Allocate(tuple_data_size);
+      free_pool_data_.emplace_back(free_pool, tuple_data);
+    } else {
+      tuple_data = tuple_data_pool_.Allocate(tuple_data_size);
+    }
     memcpy(tuple_data, input_tuple_data.data(), input_tuple_data.size());
   }
 
@@ -183,6 +196,11 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
 
 RowBatch::~RowBatch() {
   tuple_data_pool_.FreeAll();
+  for (auto& data_pair : free_pool_data_) {
+    FreePool* free_pool = data_pair.first;
+    free_pool->Free(data_pair.second);
+  }
+  free_pool_data_.clear();
   for (BufferInfo& buffer_info : buffers_) {
     ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
         buffer_info.client, &buffer_info.buffer);
@@ -366,6 +384,11 @@ void RowBatch::Reset() {
   capacity_ = tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
   // TODO: Change this to Clear() and investigate the repercussions.
   tuple_data_pool_.FreeAll();
+  for (auto& data_pair : free_pool_data_) {
+    FreePool* free_pool = data_pair.first;
+    free_pool->Free(data_pair.second);
+  }
+  free_pool_data_.clear();
   for (BufferInfo& buffer_info : buffers_) {
     ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
         buffer_info.client, &buffer_info.buffer);
@@ -378,6 +401,9 @@ void RowBatch::Reset() {
 
 void RowBatch::TransferResourceOwnership(RowBatch* dest) {
   dest->tuple_data_pool_.AcquireData(&tuple_data_pool_, false);
+  dest->free_pool_data_.insert(dest->free_pool_data_.end(),
+      free_pool_data_.begin(), free_pool_data_.end());
+  free_pool_data_.clear();
   for (BufferInfo& buffer_info : buffers_) {
     dest->AddBuffer(
         buffer_info.client, std::move(buffer_info.buffer), FlushMode::NO_FLUSH_RESOURCES);

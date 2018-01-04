@@ -27,6 +27,8 @@
 #include "common/status.h"
 #include "gen-cpp/Types_types.h"   // for TUniqueId
 #include "runtime/descriptors.h"
+#include "runtime/free-pool.h"
+#include "runtime/mem-tracker.h"
 #include "util/tuple-row-compare.h"
 
 namespace kudu {
@@ -38,7 +40,6 @@ class RpcContext;
 namespace impala {
 
 class KrpcDataStreamMgr;
-class MemTracker;
 class RowBatch;
 class RuntimeProfile;
 class SortedRunMerger;
@@ -101,7 +102,8 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   const TUniqueId& fragment_instance_id() const { return fragment_instance_id_; }
   PlanNodeId dest_node_id() const { return dest_node_id_; }
   const RowDescriptor* row_desc() const { return row_desc_; }
-  MemTracker* mem_tracker() const { return mem_tracker_.get(); }
+  MemTracker* mem_tracker() { return &mem_tracker_; }
+  FreePool* free_pool() { return &free_pool_; }
 
  private:
   friend class KrpcDataStreamMgr;
@@ -167,7 +169,11 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   AtomicInt32 num_buffered_bytes_;
 
   /// Memtracker for batches in the sender queue(s).
-  boost::scoped_ptr<MemTracker> mem_tracker_;
+  MemTracker mem_tracker_;
+
+  /// XXX
+  MemPool mem_pool_;
+  FreePool free_pool_;
 
   /// One or more queues of row batches received from senders. If is_merging_ is true,
   /// there is one SenderQueue for each sender. Otherwise, row batches from all senders
