@@ -44,7 +44,7 @@ class AggregateMemoryMetrics {
   /// including JVM memory), which is either in use by queries or cached by the BufferPool
   /// or the malloc implementation.
   /// TODO: IMPALA-691 - consider changing this to include JVM memory.
-  static SumGauge<int64_t>* TOTAL_USED;
+  static SumGauge* TOTAL_USED;
 
   /// The total number of virtual memory regions for the process.
   /// The value must be refreshed by calling Refresh().
@@ -107,8 +107,8 @@ class TcmallocMetric : public IntGauge {
     PhysicalBytesMetric(const TMetricDef& def) : IntGauge(def, 0) { }
 
    private:
-    virtual void CalculateValue() {
-      value_ = TOTAL_BYTES_RESERVED->value() - PAGEHEAP_UNMAPPED_BYTES->value();
+    virtual int64_t CalculateValue() const override {
+      return TOTAL_BYTES_RESERVED->value() - PAGEHEAP_UNMAPPED_BYTES->value();
     }
   };
 
@@ -124,12 +124,13 @@ class TcmallocMetric : public IntGauge {
   TcmallocMetric(const TMetricDef& def, const std::string& tcmalloc_var)
       : IntGauge(def, 0), tcmalloc_var_(tcmalloc_var) { }
 
-  virtual void CalculateValue() {
+  virtual int64_t CalculateValue() const override {
+    int64_t retval = 0;
 #if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
-    DCHECK_EQ(sizeof(size_t), sizeof(value_));
     MallocExtension::instance()->GetNumericProperty(tcmalloc_var_.c_str(),
-        reinterpret_cast<size_t*>(&value_));
+        reinterpret_cast<size_t*>(&retval));
 #endif
+    return retval;
   }
 };
 
@@ -140,10 +141,13 @@ class SanitizerMallocMetric : public IntGauge {
   SanitizerMallocMetric(const TMetricDef& def) : IntGauge(def, 0) {}
   static SanitizerMallocMetric* BYTES_ALLOCATED;
  private:
-  virtual void CalculateValue() override {
+  virtual int64_t CalculateValue() const override {
 #if defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER)
-    value_ = __sanitizer_get_current_allocated_bytes();
+    return __sanitizer_get_current_allocated_bytes();
+#else
+    return 0;
 #endif
+
   }
 };
 
@@ -160,7 +164,7 @@ class JvmMetric : public IntGauge {
  protected:
   /// Searches through jvm_metrics_response_ for a matching memory pool and pulls out the
   /// right value from that structure according to metric_type_.
-  virtual void CalculateValue();
+  virtual int64_t CalculateValue() const override;
 
  private:
   /// Each names one of the fields in TJvmMemoryPool.
@@ -207,7 +211,7 @@ class BufferPoolMetric : public IntGauge {
   static BufferPoolMetric* CLEAN_PAGE_BYTES;
 
  protected:
-  virtual void CalculateValue();
+  virtual int64_t CalculateValue() const override;
 
  private:
   friend class ReservationTrackerTest;

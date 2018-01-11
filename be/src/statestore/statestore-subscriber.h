@@ -203,7 +203,7 @@ class StatestoreSubscriber {
   BooleanProperty* connected_to_statestore_metric_;
 
   /// Amount of time last spent in recovery mode
-  DoubleGauge* last_recovery_duration_metric_;
+  DoubleProperty* last_recovery_duration_metric_;
 
   /// When the last recovery happened.
   StringProperty* last_recovery_time_metric_;

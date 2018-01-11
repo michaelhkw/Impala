@@ -194,10 +194,8 @@ Status ThreadMgr::StartInstrumentation(MetricGroup* metrics) {
   DCHECK(metrics != NULL);
   lock_guard<mutex> l(lock_);
   metrics_enabled_ = true;
-  total_threads_metric_ = metrics->AddGauge<int64_t>(
-      "thread-manager.total-threads-created", 0L);
-  current_num_threads_metric_ = metrics->AddGauge<int64_t>(
-      "thread-manager.running-threads", 0L);
+  total_threads_metric_ = metrics->AddGauge("thread-manager.total-threads-created", 0L);
+  current_num_threads_metric_ = metrics->AddGauge("thread-manager.running-threads", 0L);
   return Status::OK();
 }
 

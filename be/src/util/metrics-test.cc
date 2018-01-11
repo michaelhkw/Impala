@@ -73,7 +73,7 @@ class MetricsTest : public testing::Test {
 TEST_F(MetricsTest, CounterMetrics) {
   MetricGroup metrics("CounterMetrics");
   AddMetricDef("counter", TMetricKind::COUNTER, TUnit::UNIT);
-  IntCounter* int_counter = metrics.AddCounter<int64_t>("counter", 0);
+  IntCounter* int_counter = metrics.AddCounter("counter", 0);
   AssertValue(int_counter, 0, "0");
   int_counter->Increment(1);
   AssertValue(int_counter, 1, "1");
@@ -84,14 +84,14 @@ TEST_F(MetricsTest, CounterMetrics) {
 
   AddMetricDef("counter_with_units", TMetricKind::COUNTER, TUnit::BYTES);
   IntCounter* int_counter_with_units =
-      metrics.AddCounter<int64_t>("counter_with_units", 10);
+      metrics.AddCounter("counter_with_units", 10);
   AssertValue(int_counter_with_units, 10, "10.00 B");
 }
 
 TEST_F(MetricsTest, GaugeMetrics) {
   MetricGroup metrics("GaugeMetrics");
   AddMetricDef("gauge", TMetricKind::GAUGE, TUnit::NONE);
-  IntGauge* int_gauge = metrics.AddGauge<int64_t>("gauge", 0);
+  IntGauge* int_gauge = metrics.AddGauge("gauge", 0);
   AssertValue(int_gauge, 0, "0");
   int_gauge->Increment(-1);
   AssertValue(int_gauge, -1, "-1");
@@ -102,7 +102,7 @@ TEST_F(MetricsTest, GaugeMetrics) {
 
   AddMetricDef("gauge_with_units", TMetricKind::GAUGE, TUnit::TIME_S);
   IntGauge* int_gauge_with_units =
-      metrics.AddGauge<int64_t>("gauge_with_units", 10);
+      metrics.AddGauge("gauge_with_units", 10);
   AssertValue(int_gauge_with_units, 10, "10s000ms");
 }
 
@@ -111,12 +111,12 @@ TEST_F(MetricsTest, SumGauge) {
   AddMetricDef("gauge1", TMetricKind::GAUGE, TUnit::NONE);
   AddMetricDef("gauge2", TMetricKind::GAUGE, TUnit::NONE);
   AddMetricDef("sum", TMetricKind::GAUGE, TUnit::NONE);
-  IntGauge* gauge1 = metrics.AddGauge<int64_t>("gauge1", 0);
-  IntGauge* gauge2 = metrics.AddGauge<int64_t>("gauge2", 0);
+  IntGauge* gauge1 = metrics.AddGauge("gauge1", 0);
+  IntGauge* gauge2 = metrics.AddGauge("gauge2", 0);
 
   vector<IntGauge*> gauges({gauge1, gauge2});
   IntGauge* sum_gauge =
-      metrics.RegisterMetric(new SumGauge<int64_t>(MetricDefs::Get("sum"), gauges));
+      metrics.RegisterMetric(new SumGauge(MetricDefs::Get("sum"), gauges));
 
   AssertValue(sum_gauge, 0, "0");
   gauge1->Increment(1);
@@ -145,14 +145,14 @@ TEST_F(MetricsTest, PropertyMetrics) {
 
 TEST_F(MetricsTest, NonFiniteValues) {
   MetricGroup metrics("NanValues");
-  AddMetricDef("inf_value", TMetricKind::GAUGE, TUnit::NONE);
+  AddMetricDef("inf_value", TMetricKind::PROPERTY, TUnit::NONE);
   double inf = numeric_limits<double>::infinity();
-  DoubleGauge* gauge = metrics.AddGauge("inf_value", inf);
-  AssertValue(gauge, inf, "inf");
+  DoubleProperty* property = metrics.AddProperty("inf_value", inf);
+  AssertValue(property, inf, "inf");
   double nan = numeric_limits<double>::quiet_NaN();
-  gauge->set_value(nan);
-  EXPECT_TRUE(std::isnan(gauge->value()));
-  EXPECT_TRUE(gauge->ToHumanReadable() == "nan");
+  property->set_value(nan);
+  EXPECT_TRUE(std::isnan(property->value()));
+  EXPECT_TRUE(property->ToHumanReadable() == "nan");
 }
 
 TEST_F(MetricsTest, SetMetrics) {
@@ -274,7 +274,7 @@ void AssertJson(const Value& val, const string& name, const string& value,
 TEST_F(MetricsTest, CountersJson) {
   MetricGroup metrics("CounterMetrics");
   AddMetricDef("counter", TMetricKind::COUNTER, TUnit::UNIT, "description");
-  metrics.AddCounter<int64_t>("counter", 0);
+  metrics.AddCounter("counter", 0);
   Document document;
   Value val;
   metrics.ToJson(true, &document, &val);
@@ -286,7 +286,7 @@ TEST_F(MetricsTest, CountersJson) {
 TEST_F(MetricsTest, GaugesJson) {
   MetricGroup metrics("GaugeMetrics");
   AddMetricDef("gauge", TMetricKind::GAUGE, TUnit::NONE);
-  metrics.AddGauge<int64_t>("gauge", 10);
+  metrics.AddGauge("gauge", 10);
   Document document;
   Value val;
   metrics.ToJson(true, &document, &val);

@@ -68,7 +68,7 @@ TEST(MemTestTest, ConsumptionMetric) {
   neg_md.__set_key("neg_test");
   neg_md.__set_units(TUnit::BYTES);
   neg_md.__set_kind(TMetricKind::GAUGE);
-  NegatedGauge<int64_t> neg_metric(neg_md, &metric);
+  NegatedGauge neg_metric(neg_md, &metric);
 
   MemTracker t(&metric, 100, "");
   MemTracker neg_t(&neg_metric, 100, "");

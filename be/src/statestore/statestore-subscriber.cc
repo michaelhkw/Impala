@@ -113,7 +113,7 @@ StatestoreSubscriber::StatestoreSubscriber(const std::string& subscriber_id,
       metrics_(metrics->GetOrCreateChildGroup("statestore-subscriber")) {
   connected_to_statestore_metric_ =
       metrics_->AddProperty("statestore-subscriber.connected", false);
-  last_recovery_duration_metric_ = metrics_->AddGauge(
+  last_recovery_duration_metric_ = metrics_->AddProperty(
       "statestore-subscriber.last-recovery-duration", 0.0);
   last_recovery_time_metric_ = metrics_->AddProperty<string>(
       "statestore-subscriber.last-recovery-time", "N/A");

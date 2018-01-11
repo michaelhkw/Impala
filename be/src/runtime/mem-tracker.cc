@@ -211,16 +211,16 @@ MemTracker::~MemTracker() {
 }
 
 void MemTracker::RegisterMetrics(MetricGroup* metrics, const string& prefix) {
-  num_gcs_metric_ = metrics->AddCounter<int64_t>(Substitute("$0.num-gcs", prefix), 0);
+  num_gcs_metric_ = metrics->AddCounter(Substitute("$0.num-gcs", prefix), 0);
 
   // TODO: Consider a total amount of bytes freed counter
-  bytes_freed_by_last_gc_metric_ = metrics->AddGauge<int64_t>(
+  bytes_freed_by_last_gc_metric_ = metrics->AddGauge(
       Substitute("$0.bytes-freed-by-last-gc", prefix), -1);
 
-  bytes_over_limit_metric_ = metrics->AddGauge<int64_t>(
+  bytes_over_limit_metric_ = metrics->AddGauge(
       Substitute("$0.bytes-over-limit", prefix), -1);
 
-  limit_metric_ = metrics->AddGauge<int64_t>(Substitute("$0.limit", prefix), limit_);
+  limit_metric_ = metrics->AddGauge(Substitute("$0.limit", prefix), limit_);
 }
 
 // Calling this on the query tracker results in output like:

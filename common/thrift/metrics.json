@@ -882,8 +882,8 @@
       "IMPALAD"
     ],
     "label": "StateStore Subscriber Last Recovery Duration",
-    "units": "NONE",
-    "kind": "GAUGE",
+    "units": "TIME_S",
+    "kind": "PROPERTY",
     "key": "statestore-subscriber.last-recovery-duration"
   },
   {

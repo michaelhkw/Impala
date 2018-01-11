@@ -27,6 +27,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread/locks.hpp>
 
+#include "common/atomic.h"
 #include "common/logging.h"
 #include "common/object-pool.h"
 #include "common/status.h"
@@ -122,50 +123,28 @@ class Metric {
 /// floats. It is parameterised not only by the type of its value, but by both the unit
 /// (e.g. bytes/s), drawn from TUnit and the 'kind' of the metric itself. The kind
 /// can be one of: 'gauge', which may increase or decrease over time, a 'counter' which is
-/// increasing only over time, or a 'property' which is not numeric.
+/// increasing only over time, or a 'property' which is only read / written.
 //
 /// SimpleMetrics return their current value through the value() method. Access to value()
 /// is thread-safe.
-//
-/// TODO: We can use type traits to select a more efficient lock-free implementation of
-/// value() etc. where it is safe to do so.
-/// TODO: CalculateValue() can be returning a value, its current interface is not clean.
-template<typename T, TMetricKind::type metric_kind=TMetricKind::GAUGE>
-class SimpleMetric : public Metric {
+template<typename T, TMetricKind::type metric_kind>
+class SimpleMetric: public Metric {
  public:
-  SimpleMetric(const TMetricDef& metric_def, const T& initial_value)
-      : Metric(metric_def), unit_(metric_def.units), value_(initial_value) {
+  SimpleMetric(const TMetricDef& metric_def)
+    : Metric(metric_def), unit_(metric_def.units) {
     DCHECK_EQ(metric_kind, metric_def.kind) << "Metric kind does not match definition: "
         << metric_def.key;
   }
 
   virtual ~SimpleMetric() { }
 
-  /// Returns the current value, updating it if necessary. Thread-safe.
-  T value() {
-    boost::lock_guard<SpinLock> l(lock_);
-    CalculateValue();
-    return value_;
-  }
+  /// Returns the current value. Thread-safe.
+  virtual T value() = 0;
 
   /// Sets the current value. Thread-safe.
-  void set_value(const T& value) {
-    boost::lock_guard<SpinLock> l(lock_);
-    value_ = value;
-  }
+  virtual void set_value(const T& value) = 0;
 
-  /// Adds 'delta' to the current value atomically.
-  void Increment(const T& delta) {
-    DCHECK(kind() != TMetricKind::PROPERTY)
-        << "Can't change value of PROPERTY metric: " << key();
-    DCHECK(kind() != TMetricKind::COUNTER || delta >= 0)
-        << "Can't decrement value of COUNTER metric: " << key();
-    if (delta == 0) return;
-    boost::lock_guard<SpinLock> l(lock_);
-    value_ += delta;
-  }
-
-  virtual void ToJson(rapidjson::Document* document, rapidjson::Value* val) {
+  virtual void ToJson(rapidjson::Document* document, rapidjson::Value* val) override {
     rapidjson::Value container(rapidjson::kObjectType);
     AddStandardFields(document, &container);
 
@@ -181,30 +160,46 @@ class SimpleMetric : public Metric {
     *val = container;
   }
 
-  virtual std::string ToHumanReadable() {
+  virtual std::string ToHumanReadable() override {
     return PrettyPrinter::Print(value(), unit());
   }
 
-  virtual void ToLegacyJson(rapidjson::Document* document) {
+  virtual void ToLegacyJson(rapidjson::Document* document) override {
     rapidjson::Value val;
     ToJsonValue(value(), TUnit::NONE, document, &val);
     document->AddMember(key_.c_str(), val, document->GetAllocator());
   }
 
   TUnit::type unit() const { return unit_; }
+
   TMetricKind::type kind() const { return metric_kind; }
 
  protected:
-  /// Called to compute value_ if necessary during calls to value(). The more natural
-  /// approach would be to have virtual T value(), but that's not possible in C++.
-  //
-  /// TODO: Should be cheap to have a blank implementation, but if required we can cause
-  /// the compiler to avoid calling this entirely through a compile-time constant.
-  virtual void CalculateValue() { }
-
   /// Units of this metric.
   const TUnit::type unit_;
+};
 
+template<typename T>
+class SimpleProperty : public SimpleMetric<T, TMetricKind::PROPERTY> {
+ public:
+  SimpleProperty(const TMetricDef& metric_def, const T& initial_value)
+    : SimpleMetric<T, TMetricKind::PROPERTY>(metric_def), value_(initial_value) {}
+
+  virtual ~SimpleProperty() {}
+
+  /// Atomically reads the current value and returns it. Thread-safe.
+  virtual T value() override {
+    boost::lock_guard<SpinLock> l(lock_);
+    return value_;
+  }
+
+  /// AtomicallysSets the current value. Thread-safe.
+  virtual void set_value(const T& value) override {
+    boost::lock_guard<SpinLock> l(lock_);
+    value_ = value;
+  }
+
+ protected:
   /// Guards access to value_.
   SpinLock lock_;
 
@@ -212,42 +207,82 @@ class SimpleMetric : public Metric {
   T value_;
 };
 
-// Gauge metric that computes the sum of several gauges.
-template <typename T>
-class SumGauge : public SimpleMetric<T, TMetricKind::GAUGE> {
+template<TMetricKind::type metric_kind>
+class AtomicMetric : public SimpleMetric<int64_t, metric_kind> {
  public:
-  SumGauge(const TMetricDef& metric_def,
-      const std::vector<SimpleMetric<T, TMetricKind::GAUGE>*>& metrics)
-    : SimpleMetric<T, TMetricKind::GAUGE>(metric_def, 0), metrics_(metrics) {}
+  AtomicMetric(const TMetricDef& metric_def, const int64_t initial_value)
+    : SimpleMetric<int64_t, metric_kind>(metric_def), value_(initial_value) {
+    DCHECK(metric_kind == TMetricKind::GAUGE || metric_kind == TMetricKind::COUNTER);
+  }
+
+  virtual ~AtomicMetric() {}
+
+  /// Returns the current value.
+  virtual int64_t value() override { return CalculateValue(); }
+
+  /// Sets the current value.
+  void set_value(const int64_t& value) override { value_.Store(value); }
+
+  /// Adds 'delta' to the current value atomically.
+  void Increment(int64_t delta) {
+    DCHECK(metric_kind != TMetricKind::COUNTER || delta >= 0)
+        << "Can't decrement value of COUNTER metric: " << this->key();
+    value_.Add(delta);
+  }
+
+ protected:
+  /// Called to compute value if necessary during calls to value(). May be overridden
+  /// by derived classes. The default implementation just atomically loads 'value_'.
+  /// Derived classes which derive the return value from sources other than 'value_'
+  /// need to take care of their own synchronization among sources.
+  virtual int64_t CalculateValue() const { return value_.Load(); }
+
+  /// The current value of the metric.
+  AtomicInt64 value_;
+};
+
+/// We write 'Int' as a placeholder for all integer types.
+typedef class AtomicMetric<TMetricKind::GAUGE> IntGauge;
+typedef class AtomicMetric<TMetricKind::COUNTER> IntCounter;
+
+typedef class SimpleProperty<bool> BooleanProperty;
+typedef class SimpleProperty<double> DoubleProperty;
+typedef class SimpleProperty<std::string> StringProperty;
+
+// Gauge metric that computes the sum of several gauges.
+class SumGauge : public IntGauge {
+ public:
+  SumGauge(const TMetricDef& metric_def, const std::vector<IntGauge*>& gauges)
+    : IntGauge(metric_def, 0), gauges_(gauges) {}
+
   virtual ~SumGauge() {}
 
  private:
-  virtual void CalculateValue() override {
-    T sum = 0;
-    for (SimpleMetric<T, TMetricKind::GAUGE>* metric : metrics_) sum += metric->value();
-    this->value_ = sum;
+  virtual int64_t CalculateValue() const override {
+    int64_t sum = 0;
+    for (auto gauge : gauges_) sum += gauge->value();
+    return sum;
   }
 
-  /// The metrics to be summed.
-  std::vector<SimpleMetric<T, TMetricKind::GAUGE>*> metrics_;
+  /// The gauges to be summed.
+  std::vector<IntGauge*> gauges_;
 };
 
 // Gauge metric that negates another gauge.
-template <typename T>
-class NegatedGauge : public SimpleMetric<T, TMetricKind::GAUGE> {
+class NegatedGauge : public IntGauge {
  public:
-  NegatedGauge(const TMetricDef& metric_def,
-      SimpleMetric<T, TMetricKind::GAUGE>* metric)
-    : SimpleMetric<T, TMetricKind::GAUGE>(metric_def, 0), metric_(metric) {}
+  NegatedGauge(const TMetricDef& metric_def, IntGauge* gauge)
+    : IntGauge(metric_def, 0), gauge_(gauge) {}
+
   virtual ~NegatedGauge() {}
 
  private:
-  virtual void CalculateValue() override {
-    this->value_ = -metric_->value();
+  virtual int64_t CalculateValue() const override {
+    return -gauge_->value();
   }
 
   /// The metric to be negated.
-  SimpleMetric<T, TMetricKind::GAUGE>* metric_;
+  IntGauge* gauge_;
 };
 
 /// Container for a set of metrics. A MetricGroup owns the memory for every metric
@@ -285,25 +320,21 @@ class MetricGroup {
   }
 
   /// Create a gauge metric object with given key and initial value (owned by this object)
-  template<typename T>
-  SimpleMetric<T>* AddGauge(const std::string& key, const T& value,
+  IntGauge* AddGauge(const std::string& key, const int64_t value,
       const std::string& metric_def_arg = "") {
-    return RegisterMetric(new SimpleMetric<T, TMetricKind::GAUGE>(
-        MetricDefs::Get(key, metric_def_arg), value));
+    return RegisterMetric(new IntGauge(MetricDefs::Get(key, metric_def_arg), value));
   }
 
   template<typename T>
-  SimpleMetric<T, TMetricKind::PROPERTY>* AddProperty(const std::string& key,
+  SimpleProperty<T>* AddProperty(const std::string& key,
       const T& value, const std::string& metric_def_arg = "") {
-    return RegisterMetric(new SimpleMetric<T, TMetricKind::PROPERTY>(
+    return RegisterMetric(new SimpleProperty<T>(
         MetricDefs::Get(key, metric_def_arg), value));
   }
 
-  template<typename T>
-  SimpleMetric<T, TMetricKind::COUNTER>* AddCounter(const std::string& key,
-      const T& value, const std::string& metric_def_arg = "") {
-    return RegisterMetric(new SimpleMetric<T, TMetricKind::COUNTER>(
-        MetricDefs::Get(key, metric_def_arg), value));
+  IntCounter* AddCounter(const std::string& key, const int64_t value,
+      const std::string& metric_def_arg = "") {
+    return RegisterMetric(new IntCounter(MetricDefs::Get(key, metric_def_arg), value));
   }
 
   /// Returns a metric by key. All MetricGroups reachable from this group are searched in
@@ -380,13 +411,6 @@ class MetricGroup {
       rapidjson::Document* document);
 };
 
-/// We write 'Int' as a placeholder for all integer types.
-typedef class SimpleMetric<int64_t, TMetricKind::GAUGE> IntGauge;
-typedef class SimpleMetric<double, TMetricKind::GAUGE> DoubleGauge;
-typedef class SimpleMetric<int64_t, TMetricKind::COUNTER> IntCounter;
-
-typedef class SimpleMetric<bool, TMetricKind::PROPERTY> BooleanProperty;
-typedef class SimpleMetric<std::string, TMetricKind::PROPERTY> StringProperty;
 
 /// Convenience method to instantiate a TMetricDef with a subset of its fields defined.
 /// Most externally-visible metrics should be defined in metrics.json and retrieved via
