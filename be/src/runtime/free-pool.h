@@ -19,6 +19,7 @@
 #ifndef IMPALA_RUNTIME_FREE_POOL_H
 #define IMPALA_RUNTIME_FREE_POOL_H
 
+#include <mutex>
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -29,6 +30,7 @@
 #include "gutil/dynamic_annotations.h"
 #include "runtime/mem-pool.h"
 #include "util/bit-util.h"
+#include "util/spinlock.h"
 
 DECLARE_bool(disable_mem_pools);
 
@@ -58,10 +60,12 @@ class FreePool {
   }
 
   /// Allocates a buffer of size between [0, 2^62 - 1 - sizeof(FreeListNode)] bytes.
+  template <bool CHECK_LIMIT_FIRST>
   uint8_t* Allocate(const int64_t requested_size) {
     DCHECK_GE(requested_size, 0);
     /// Return a non-nullptr dummy pointer. nullptr is reserved for failures.
     if (UNLIKELY(requested_size == 0)) return mem_pool_->EmptyAllocPtr();
+    std::unique_lock<SpinLock> l(lock_);
     ++net_allocations_;
     if (FLAGS_disable_mem_pools) {
       return reinterpret_cast<uint8_t*>(malloc(requested_size));
@@ -75,8 +79,12 @@ class FreePool {
     if (allocation == nullptr) {
       // There wasn't an existing allocation of the right size, allocate a new one.
       actual_size = 1LL << free_list_idx;
-      allocation = reinterpret_cast<FreeListNode*>(
-          mem_pool_->Allocate(actual_size + sizeof(FreeListNode)));
+      int64_t alloc_size = actual_size + sizeof(FreeListNode);
+      if (CHECK_LIMIT_FIRST) {
+        allocation = reinterpret_cast<FreeListNode*>(mem_pool_->TryAllocate(alloc_size));
+      } else {
+        allocation = reinterpret_cast<FreeListNode*>(mem_pool_->Allocate(alloc_size));
+      }
       if (UNLIKELY(allocation == nullptr)) {
         --net_allocations_;
         return nullptr;
@@ -100,8 +108,17 @@ class FreePool {
     return reinterpret_cast<uint8_t*>(allocation) + sizeof(FreeListNode);
   }
 
+  uint8_t* Allocate(const int64_t requested_size) {
+    return Allocate<false>(requested_size);
+  }
+
+  uint8_t* TryAllocate(const int64_t requested_size) {
+    return Allocate<true>(requested_size);
+  }
+
   void Free(uint8_t* ptr) {
     if (UNLIKELY(ptr == nullptr || ptr == mem_pool_->EmptyAllocPtr())) return;
+    std::unique_lock<SpinLock> l(lock_);
     --net_allocations_;
     if (FLAGS_disable_mem_pools) {
       free(ptr);
@@ -151,6 +168,7 @@ class FreePool {
       // Ensure that only first size bytes are unpoisoned. Need to poison whole region
       // first in case size is smaller than original allocation's size.
 #ifdef ADDRESS_SANITIZER
+      std::unique_lock<SpinLock> l(lock_);
       DCHECK(alloc_to_size_.find(ptr) != alloc_to_size_.end());
       int64_t prev_allocation_size = alloc_to_size_[ptr];
       if (prev_allocation_size > size) {
@@ -171,9 +189,12 @@ class FreePool {
     uint8_t* new_ptr = Allocate(size);
     if (LIKELY(new_ptr != nullptr)) {
 #ifdef ADDRESS_SANITIZER
-      DCHECK(alloc_to_size_.find(ptr) != alloc_to_size_.end());
-      // Unpoison the region so that we can copy the old allocation to the new one.
-      ASAN_UNPOISON_MEMORY_REGION(ptr, allocation_size);
+      {
+        std::unique_lock<SpinLock> l(lock_);
+        DCHECK(alloc_to_size_.find(ptr) != alloc_to_size_.end());
+        // Unpoison the region so that we can copy the old allocation to the new one.
+        ASAN_UNPOISON_MEMORY_REGION(ptr, allocation_size);
+      }
 #endif
       memcpy(new_ptr, ptr, allocation_size);
       Free(ptr);
@@ -233,6 +254,9 @@ class FreePool {
   /// While it doesn't make too much sense to use this for very small (e.g. 8 byte)
   /// allocations, it makes the indexing easy.
   FreeListNode lists_[NUM_LISTS];
+
+  /// XXX
+  SpinLock lock_;
 
 #ifdef ADDRESS_SANITIZER
   // For ASAN only: keep track of used bytes for each allocation (not including

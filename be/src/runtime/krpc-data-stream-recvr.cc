@@ -25,9 +25,9 @@
 
 #include "exec/kudu-util.h"
 #include "kudu/rpc/rpc_context.h"
+#include "rpc/impala-service-pool.h"
 #include "runtime/krpc-data-stream-recvr.h"
 #include "runtime/krpc-data-stream-mgr.h"
-#include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/sorted-run-merger.h"
 #include "util/runtime-profile-counters.h"
@@ -39,9 +39,15 @@
 
 DECLARE_bool(use_krpc);
 DECLARE_int32(datastream_service_num_deserialization_threads);
+DECLARE_int32(datastream_service_num_svc_threads);
 
 using kudu::rpc::RpcContext;
 using std::condition_variable_any;
+
+// XXX
+DEFINE_int64(recvr_recycled_pools_size_bytes, 1024 * 1024 * 64,
+    "(Advanced) XXX");
+DEFINE_int32(threads_per_recvr_recycled_pool, 4, "XXX");
 
 namespace impala {
 
@@ -310,7 +316,7 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
     // handle deleting any unconsumed batches from batch_queue_. Close() cannot proceed
     // until there are no pending insertion to batch_queue_.
     batch.reset(new RowBatch(recvr_->row_desc(), header, tuple_offsets, tuple_data,
-        recvr_->mem_tracker()));
+        recvr_->mem_tracker(), recvr_->GetFreePool(Thread::current_tid())));
   }
   lock->lock();
 
@@ -506,9 +512,9 @@ void KrpcDataStreamRecvr::TransferAllResources(RowBatch* transfer_batch) {
 }
 
 KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
-    MemTracker* parent_tracker, const RowDescriptor* row_desc,
-    const TUniqueId& fragment_instance_id, PlanNodeId dest_node_id, int num_senders,
-    bool is_merging, int64_t total_buffer_limit, RuntimeProfile* profile)
+    const RowDescriptor* row_desc, const TUniqueId& fragment_instance_id,
+    PlanNodeId dest_node_id, int num_senders, int64_t total_buffer_limit,
+    bool is_merging, RuntimeProfile* profile, MemTracker* parent_tracker)
   : mgr_(stream_mgr),
     fragment_instance_id_(fragment_instance_id),
     dest_node_id_(dest_node_id),
@@ -516,10 +522,14 @@ KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
     row_desc_(row_desc),
     is_merging_(is_merging),
     num_buffered_bytes_(0),
+    mem_tracker_(-1, "KrpcDataStreamRecvr", parent_tracker),
+    recycled_pools_tracker_(FLAGS_recvr_recycled_pools_size_bytes,
+        "Recycled Pool", &mem_tracker_),
+    num_pools_(min(1, FLAGS_datastream_service_num_svc_threads /
+        FLAGS_threads_per_recvr_recycled_pool)),
     profile_(profile),
     recvr_side_profile_(profile_->CreateChild("RecvrSide")),
     sender_side_profile_(profile_->CreateChild("SenderSide")) {
-  mem_tracker_.reset(new MemTracker(-1, "KrpcDataStreamRecvr", parent_tracker));
   // Create one queue per sender if is_merging is true.
   int num_queues = is_merging ? num_senders : 1;
   sender_queues_.reserve(num_queues);
@@ -528,6 +538,12 @@ KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
     SenderQueue* queue =
         sender_queue_pool_.Add(new SenderQueue(this, num_sender_per_queue));
     sender_queues_.push_back(queue);
+  }
+
+  // XXX number of pools
+  for (int i = 0; i < num_pools_; ++i) {
+    mem_pools_.emplace_back(new MemPool(&recycled_pools_tracker_));
+    free_pools_.emplace_back(new FreePool(mem_pools_.back().get()));
   }
 
   // Initialize the counters
@@ -595,7 +611,11 @@ void KrpcDataStreamRecvr::Close() {
   mgr_ = nullptr;
   for (auto& queue: sender_queues_) queue->Close();
   merger_.reset();
-  mem_tracker_->Close();
+  free_pools_.clear();
+  for (auto& mem_pool : mem_pools_) mem_pool->FreeAll();
+  mem_pools_.clear();
+  recycled_pools_tracker_.Close();
+  mem_tracker_.Close();
   recvr_side_profile_->StopPeriodicCounters();
 }
 

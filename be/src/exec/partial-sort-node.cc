@@ -148,6 +148,7 @@ Status PartialSortNode::Reset(RuntimeState* state) {
 
 void PartialSortNode::Close(RuntimeState* state) {
   if (is_closed()) return;
+  input_batch_->Reset();
   child(0)->Close(state);
   if (sorter_ != nullptr) sorter_->Close(state);
   sorter_.reset();
