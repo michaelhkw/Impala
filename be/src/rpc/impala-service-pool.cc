@@ -164,6 +164,7 @@ kudu::Status ImpalaServicePool::QueueInboundCall(
 }
 
 void ImpalaServicePool::RunThread() {
+  VLOG_QUERY << "Starting service thread " << Thread::current_tid();
   while (true) {
     std::unique_ptr<kudu::rpc::InboundCall> incoming;
     if (!service_queue_.BlockingGet(&incoming)) {

@@ -316,9 +316,10 @@ Status ExecEnv::Init() {
     RETURN_IF_ERROR(KrpcStreamMgr()->Init());
     RETURN_IF_ERROR(rpc_mgr_->Init());
     unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get()));
-    int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
-        FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
-    RETURN_IF_ERROR(rpc_mgr_->RegisterService(num_svc_threads,
+    if (FLAGS_datastream_service_num_svc_threads == 0) {
+      FLAGS_datastream_service_num_svc_threads = CpuInfo::num_cores();
+    }
+    RETURN_IF_ERROR(rpc_mgr_->RegisterService(FLAGS_datastream_service_num_svc_threads,
         FLAGS_datastream_service_queue_depth, move(data_svc)));
   }
 

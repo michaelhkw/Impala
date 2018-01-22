@@ -102,10 +102,10 @@ class DataStreamRecvr : public DataStreamRecvrBase {
   friend class DataStreamMgr;
   class SenderQueue;
 
-  DataStreamRecvr(DataStreamMgr* stream_mgr, MemTracker* parent_tracker,
-      const RowDescriptor* row_desc, const TUniqueId& fragment_instance_id,
-      PlanNodeId dest_node_id, int num_senders, bool is_merging,
-      int64_t total_buffer_limit, RuntimeProfile* parent_profile);
+  DataStreamRecvr(DataStreamMgr* stream_mgr, const RowDescriptor* row_desc,
+      const TUniqueId& fragment_instance_id, PlanNodeId dest_node_id, int num_senders,
+      int64_t total_buffer_limit, bool is_merging, RuntimeProfile* parent_profile,
+      MemTracker* parent_tracker);
 
   /// Add a new batch of rows to the appropriate sender queue, blocking if the queue is
   /// full. Called from DataStreamMgr.
