@@ -100,8 +100,16 @@ template <class T> class RpcMgrTestBase : public T {
     request->set_sidecar_idx(idx);
   }
 
+  ServiceIf* CreateService(std::unique_ptr<ServiceIf> service) {
+    services_.emplace_back(move(service));
+    return services_.back().get();
+  }
+
  private:
   int32_t payload_[PAYLOAD_SIZE];
+
+  // Own all the services used in the test.
+  std::vector<std::unique_ptr<ServiceIf>> services_;
 };
 
 // For tests that do not require kerberized testing, we use RpcTest.
@@ -201,15 +209,15 @@ INSTANTIATE_TEST_CASE_P(KerberosOnAndOff,
 
 TEST_P(RpcMgrKerberizedTest, MultipleServices) {
   // Test that a service can be started, and will respond to requests.
-  unique_ptr<ServiceIf> ping_impl(
-      new PingServiceImpl(rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
-  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, move(ping_impl)));
+  ServiceIf* ping_impl = CreateService(make_unique<PingServiceImpl>(
+      rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
+  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, ping_impl));
 
   // Test that a second service, that verifies the RPC payload is not corrupted,
   // can be started.
-  unique_ptr<ServiceIf> scan_mem_impl(
-      new ScanMemServiceImpl(rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
-  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, move(scan_mem_impl)));
+  ServiceIf* scan_mem_impl = CreateService(make_unique<ScanMemServiceImpl>(
+      rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
+  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, scan_mem_impl));
 
   FLAGS_num_acceptor_threads = 2;
   FLAGS_num_reactor_threads = 10;
@@ -254,11 +262,11 @@ TEST_F(RpcMgrTest, SlowCallback) {
   // Test a service which is slow to respond and has a short queue.
   // Set a timeout on the client side. Expect either a client timeout
   // or the service queue filling up.
-  unique_ptr<ServiceIf> impl(
-      new PingServiceImpl(rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker(), slow_cb));
+  ServiceIf* impl = CreateService(make_unique<PingServiceImpl>(
+      rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker(), slow_cb));
   const int num_service_threads = 1;
   const int queue_size = 3;
-  ASSERT_OK(rpc_mgr_.RegisterService(num_service_threads, queue_size, move(impl)));
+  ASSERT_OK(rpc_mgr_.RegisterService(num_service_threads, queue_size, impl));
 
   FLAGS_num_acceptor_threads = 2;
   FLAGS_num_reactor_threads = 10;
@@ -279,9 +287,9 @@ TEST_F(RpcMgrTest, SlowCallback) {
 }
 
 TEST_F(RpcMgrTest, AsyncCall) {
-  unique_ptr<ServiceIf> scan_mem_impl(
-      new ScanMemServiceImpl(rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
-  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, move(scan_mem_impl)));
+  ServiceIf* scan_mem_impl = CreateService(make_unique<ScanMemServiceImpl>(
+      rpc_mgr_.metric_entity(), rpc_mgr_.result_tracker()));
+  ASSERT_OK(rpc_mgr_.RegisterService(10, 10, scan_mem_impl));
 
   unique_ptr<ScanMemServiceProxy> scan_mem_proxy;
   ASSERT_OK(rpc_mgr_.GetProxy<ScanMemServiceProxy>(krpc_address_, &scan_mem_proxy));

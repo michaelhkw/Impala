@@ -18,6 +18,7 @@
 #include "runtime/krpc-data-stream-recvr.h"
 
 #include <condition_variable>
+#include <tuple>
 #include <queue>
 
 #include <boost/thread/locks.hpp>
@@ -25,13 +26,16 @@
 
 #include "exec/kudu-util.h"
 #include "kudu/rpc/rpc_context.h"
+#include "runtime/exec-env.h"
 #include "runtime/krpc-data-stream-recvr.h"
 #include "runtime/krpc-data-stream-mgr.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/sorted-run-merger.h"
+#include "service/data-stream-service.h"
 #include "util/runtime-profile-counters.h"
 #include "util/periodic-counter-updater.h"
+#include "util/thread.h"
 
 #include "gen-cpp/data_stream_service.pb.h"
 
@@ -162,7 +166,7 @@ class KrpcDataStreamRecvr::SenderQueue {
   // Signal the arrival of new batch or the eos/cancelled condition.
   condition_variable_any data_arrival_cv_;
 
-  // Queue of (batch length, batch) pairs. The SenderQueue owns the memory to these
+  // Queue of (batch length, tid, batch) pairs. The SenderQueue owns the memory to these
   // batches until they are handed off to the callers of GetBatch().
   typedef list<pair<int, std::unique_ptr<RowBatch>>> RowBatchQueue;
   RowBatchQueue batch_queue_;
@@ -310,7 +314,7 @@ void KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
     // handle deleting any unconsumed batches from batch_queue_. Close() cannot proceed
     // until there are no pending insertion to batch_queue_.
     batch.reset(new RowBatch(recvr_->row_desc(), header, tuple_offsets, tuple_data,
-        recvr_->mem_tracker()));
+        recvr_->mem_tracker(), Thread::current_tid()));
   }
   lock->lock();
 

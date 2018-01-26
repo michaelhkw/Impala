@@ -43,6 +43,7 @@ class BufferPool;
 class CallableThreadPool;
 class DataStreamMgrBase;
 class DataStreamMgr;
+class DataStreamService;
 class QueryExecMgr;
 class Frontend;
 class HBaseTableFactory;
@@ -128,6 +129,7 @@ class ExecEnv {
   TmpFileMgr* tmp_file_mgr() { return tmp_file_mgr_.get(); }
   CallableThreadPool* exec_rpc_thread_pool() { return exec_rpc_thread_pool_.get(); }
   ImpalaServer* impala_server() { return impala_server_; }
+  DataStreamService* data_svc() { return data_svc_.get(); }
   Frontend* frontend() { return frontend_.get(); }
   RequestPoolService* request_pool_service() { return request_pool_service_.get(); }
   CallableThreadPool* rpc_pool() { return async_rpc_pool_.get(); }
@@ -198,6 +200,7 @@ class ExecEnv {
   boost::scoped_ptr<CallableThreadPool> async_rpc_pool_;
   boost::scoped_ptr<QueryExecMgr> query_exec_mgr_;
   boost::scoped_ptr<RpcMgr> rpc_mgr_;
+  boost::scoped_ptr<DataStreamService> data_svc_;
 
   /// Query-wide buffer pool and the root reservation tracker for the pool. The
   /// reservation limit is equal to the maximum capacity of the pool. Created in

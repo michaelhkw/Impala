@@ -115,7 +115,7 @@ TEST_F(RowBatchListTest, EmptyBatchTest) {
   RowBatchList row_list;
   RowBatch* batch1 = pool_.Add(new RowBatch(desc_, 1, &tracker_));
   batch1->tuple_data_pool()->Allocate(ALLOC_SIZE);
-  DCHECK_EQ(ALLOC_SIZE, batch1->tuple_data_pool()->total_allocated_bytes());
+  DCHECK_EQ(ALLOC_SIZE, batch1->GetMemUsage());
 
   row_list.AddRowBatch(batch1);
   EXPECT_EQ(row_list.total_num_rows(), 0);
@@ -124,10 +124,10 @@ TEST_F(RowBatchListTest, EmptyBatchTest) {
 
   // IMPALA-4049: list should transfer resources attached to empty batch.
   RowBatch* batch2 = pool_.Add(new RowBatch(desc_, 1, &tracker_));
-  DCHECK_EQ(0, batch2->tuple_data_pool()->total_allocated_bytes());
+  DCHECK_EQ(0, batch2->GetMemUsage());
   row_list.TransferResourceOwnership(batch2);
-  DCHECK_EQ(0, batch1->tuple_data_pool()->total_allocated_bytes());
-  DCHECK_EQ(ALLOC_SIZE, batch2->tuple_data_pool()->total_allocated_bytes());
+  DCHECK_EQ(0, batch1->GetMemUsage());
+  DCHECK_EQ(ALLOC_SIZE, batch2->GetMemUsage());
 }
 
 // This tests inserts 100 row batches of 1024 rows each to list.  It validates that they

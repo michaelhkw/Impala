@@ -84,9 +84,7 @@ class Promise {
     int64_t now;
     now = start = MonotonicMicros();
     while (!val_is_set_ && (now - start) < timeout_micros) {
-      boost::posix_time::microseconds wait_time =
-          boost::posix_time::microseconds(std::max<int64_t>(
-              1, timeout_micros - (now - start)));
+      int64_t wait_time = std::max<int64_t>(1, timeout_micros - (now - start));
       val_set_cond_.WaitFor(l, wait_time);
       now = MonotonicMicros();
     }

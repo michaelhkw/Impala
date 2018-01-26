@@ -57,6 +57,18 @@ inline int64_t UnixMillis() {
   return GetCurrentTimeMicros() / MICROS_PER_MILLI;
 }
 
+inline void TimeFromNowMicros(int64_t time_micros, timespec* abs_time) {
+  clock_gettime(CLOCK_MONOTONIC, abs_time);
+  abs_time->tv_nsec += (time_micros % MICROS_PER_SEC) * NANOS_PER_MICRO;
+  abs_time->tv_sec += time_micros / MICROS_PER_SEC;
+  abs_time->tv_sec += abs_time->tv_nsec / NANOS_PER_SEC;
+  abs_time->tv_nsec %= NANOS_PER_SEC;
+}
+
+inline void TimeFromNowMillis(int64_t time_millis, timespec* abs_time) {
+  return TimeFromNowMicros(time_millis * MICROS_PER_MILLI, abs_time);
+}
+
 /// Returns the number of microseconds that have passed since the Unix epoch. This is
 /// affected by manual changes to the system clock but is more suitable for use across
 /// a cluster. For more accurate timings on the local host use the monotonic functions
