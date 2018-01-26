@@ -180,6 +180,14 @@ ExecEnv::ExecEnv(const string& hostname, int backend_port, int krpc_port,
     VLOG_QUERY << "Using KRPC.";
     // KRPC relies on resolved IP address. It's set in StartServices().
     krpc_address_.__set_port(krpc_port);
+    if (FLAGS_datastream_service_num_svc_threads == 0) {
+      FLAGS_datastream_service_num_svc_threads = CpuInfo::num_cores();
+    }
+    // Bump thread cache to 1GB to reduce contention for TCMalloc central
+    // list's spinlock.
+    if (FLAGS_tcmalloc_max_total_thread_cache_bytes == 0) {
+      FLAGS_tcmalloc_max_total_thread_cache_bytes = 1 << 30;
+    }
     rpc_mgr_.reset(new RpcMgr());
     stream_mgr_.reset(new KrpcDataStreamMgr(metrics_.get()));
   } else {
@@ -300,23 +308,6 @@ Status ExecEnv::Init() {
   // Resolve hostname to IP address.
   RETURN_IF_ERROR(HostnameToIpAddr(backend_address_.hostname, &ip_address_));
 
-  // Initialize the RPCMgr before allowing services registration.
-  if (FLAGS_use_krpc) {
-    krpc_address_.__set_hostname(ip_address_);
-    RETURN_IF_ERROR(KrpcStreamMgr()->Init());
-    RETURN_IF_ERROR(rpc_mgr_->Init());
-    unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get()));
-    int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
-        FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
-    RETURN_IF_ERROR(rpc_mgr_->RegisterService(num_svc_threads,
-        FLAGS_datastream_service_queue_depth, move(data_svc)));
-    // Bump thread cache to 1GB to reduce contention for TCMalloc central
-    // list's spinlock.
-    if (FLAGS_tcmalloc_max_total_thread_cache_bytes == 0) {
-      FLAGS_tcmalloc_max_total_thread_cache_bytes = 1 << 30;
-    }
-  }
-
   mem_tracker_.reset(
       new MemTracker(AggregateMemoryMetrics::TOTAL_USED, bytes_limit, "Process"));
   // Add BufferPool MemTrackers for cached memory that is not tracked against queries
@@ -374,6 +365,18 @@ Status ExecEnv::Init() {
 
   mem_tracker_->AddGcFunction(
       [this](int64_t bytes_to_free) { disk_io_mgr_->GcIoBuffers(bytes_to_free); });
+
+  // Initialize the RPCMgr before allowing services registration.
+  if (FLAGS_use_krpc) {
+    krpc_address_.__set_hostname(ip_address_);
+    RETURN_IF_ERROR(KrpcStreamMgr()->Init());
+    RETURN_IF_ERROR(rpc_mgr_->Init());
+    unique_ptr<ServiceIf> data_svc(new DataStreamService(rpc_mgr_.get(),
+        FLAGS_datastream_service_num_svc_threads));
+    data_svc_ = reinterpret_cast<DataStreamService*>(data_svc.get());
+    RETURN_IF_ERROR(rpc_mgr_->RegisterService(FLAGS_datastream_service_num_svc_threads,
+        FLAGS_datastream_service_queue_depth, move(data_svc)));
+  }
 
   // Start services in order to ensure that dependencies between them are met
   if (enable_webserver_) {

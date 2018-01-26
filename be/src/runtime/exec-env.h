@@ -43,6 +43,7 @@ class BufferPool;
 class CallableThreadPool;
 class DataStreamMgrBase;
 class DataStreamMgr;
+class DataStreamService;
 class QueryExecMgr;
 class Frontend;
 class HBaseTableFactory;
@@ -128,6 +129,7 @@ class ExecEnv {
   TmpFileMgr* tmp_file_mgr() { return tmp_file_mgr_.get(); }
   CallableThreadPool* exec_rpc_thread_pool() { return exec_rpc_thread_pool_.get(); }
   ImpalaServer* impala_server() { return impala_server_; }
+  DataStreamService* data_svc() { return data_svc_; }
   Frontend* frontend() { return frontend_.get(); }
   RequestPoolService* request_pool_service() { return request_pool_service_.get(); }
   CallableThreadPool* rpc_pool() { return async_rpc_pool_.get(); }
@@ -207,6 +209,7 @@ class ExecEnv {
 
   /// Not owned by this class
   ImpalaServer* impala_server_ = nullptr;
+  DataStreamService* data_svc_ = nullptr;
 
   bool enable_webserver_;
 

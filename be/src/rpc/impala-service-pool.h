@@ -36,6 +36,7 @@ namespace impala {
 // Also includes a queue that calls get pushed onto for handling by the pool.
 class ImpalaServicePool : public kudu::rpc::RpcService {
  public:
+    // XXX
   ImpalaServicePool(std::unique_ptr<kudu::rpc::ServiceIf> service,
               const scoped_refptr<kudu::MetricEntity>& metric_entity,
               size_t service_queue_length);

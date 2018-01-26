@@ -20,6 +20,12 @@
 
 #include "gen-cpp/data_stream_service.service.h"
 
+#include <mutex>
+#include <queue>
+
+#include "runtime/mem-tracker.h"
+#include "util/spinlock.h"
+
 namespace kudu {
 namespace rpc {
 class RpcContext;
@@ -28,7 +34,28 @@ class RpcContext;
 
 namespace impala {
 
+class MemPool;
+class RowBatch;
 class RpcMgr;
+
+class RecycledBatchesQueue {
+ public:
+  void Insert(std::unique_ptr<RowBatch> batch) {
+    std::unique_lock<SpinLock> l(lock_);
+    recycled_batches_.push(std::move(batch));
+  }
+
+  bool DrainQueue() {
+    std::unique_lock<SpinLock> l(lock_);
+    bool is_empty = recycled_batches_.empty();
+    while (!recycled_batches_.empty()) recycled_batches_.pop();
+    return !is_empty;
+  }
+
+ private:
+  SpinLock lock_;
+  std::queue<std::unique_ptr<RowBatch>> recycled_batches_;
+};
 
 /// This is singleton class which provides data transmission services between fragment
 /// instances. The client for this service is implemented in KrpcDataStreamSender.
@@ -37,7 +64,7 @@ class RpcMgr;
 /// appropriate receivers.
 class DataStreamService : public DataStreamServiceIf {
  public:
-  DataStreamService(RpcMgr* rpc_mgr);
+  DataStreamService(RpcMgr* rpc_mgr, int num_svc_threads);
 
   /// Notifies the receiver to close the data stream specified in 'request'.
   /// The receiver replies to the client with a status serialized in 'response'.
@@ -48,6 +75,21 @@ class DataStreamService : public DataStreamServiceIf {
   /// The receiver replies to the client with a status serialized in 'response'.
   virtual void TransmitData(const TransmitDataRequestPB* request,
       TransmitDataResponsePB* response, kudu::rpc::RpcContext* context);
+
+  /// XXX
+  bool DrainQueue(int64_t tid);
+
+  /// XXX
+  void AcquireTupleData(int64_t tid, const RowBatch& src, MemPool* tuple_data_pool);
+
+ private:
+  const int num_svc_threads_;
+
+  /// XXX
+  std::vector<RecycledBatchesQueue> recycled_batches_queues_;
+
+  /// XXX
+  MemTracker mem_tracker_;
 };
 
 } // namespace impala

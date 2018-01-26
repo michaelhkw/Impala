@@ -50,6 +50,8 @@ static const string THREADS_TEMPLATE = "threadz.tmpl";
 static const string THREAD_GROUP_WEB_PAGE = "/thread-group";
 static const string THREAD_GROUP_TEMPLATE = "/thread-group.tmpl";
 
+__thread int64_t Thread::current_tid_ = INVALID_THREAD_ID;
+
 class ThreadMgr;
 
 // Singleton instance of ThreadMgr. Only visible in this file, used only by Thread.
@@ -341,6 +343,7 @@ void Thread::SuperviseThread(const string& name, const string& category,
   // Use boost's get_id rather than the system thread ID as the unique key for this thread
   // since the latter is more prone to being recycled.
 
+  current_tid_ = system_tid;
   thread_mgr_ref->AddThread(this_thread::get_id(), name_copy, category_copy, system_tid);
   thread_started->Set(system_tid);
 

@@ -34,20 +34,43 @@ using kudu::rpc::RpcContext;
 
 namespace impala {
 
-DataStreamService::DataStreamService(RpcMgr* mgr)
-  : DataStreamServiceIf(mgr->metric_entity(), mgr->result_tracker()) {}
+DataStreamService::DataStreamService(RpcMgr* mgr, int num_svc_threads)
+  : DataStreamServiceIf(mgr->metric_entity(), mgr->result_tracker()),
+    num_svc_threads_(num_svc_threads),
+    recycled_batches_queues_(num_svc_threads),
+    mem_tracker_(-1, "Data Stream Service", ExecEnv::GetInstance()->process_mem_tracker()) { }
+
+inline bool DataStreamService::DrainQueue(int64_t tid) {
+  return recycled_batches_queues_[tid % num_svc_threads_].DrainQueue();
+}
 
 void DataStreamService::EndDataStream(const EndDataStreamRequestPB* request,
     EndDataStreamResponsePB* response, RpcContext* rpc_context) {
+  int64_t tid = Thread::current_tid();
+  DrainQueue(tid);
   // CloseSender() is guaranteed to eventually respond to this RPC so we don't do it here.
   ExecEnv::GetInstance()->KrpcStreamMgr()->CloseSender(request, response, rpc_context);
+  DrainQueue(tid);
 }
 
 void DataStreamService::TransmitData(const TransmitDataRequestPB* request,
     TransmitDataResponsePB* response, RpcContext* rpc_context) {
   FAULT_INJECTION_RPC_DELAY(RPC_TRANSMITDATA);
+  int64_t tid = Thread::current_tid();
+  DrainQueue(tid);
   // AddData() is guaranteed to eventually respond to this RPC so we don't do it here.
   ExecEnv::GetInstance()->KrpcStreamMgr()->AddData(request, response, rpc_context);
+  DrainQueue(tid);
+}
+
+void DataStreamService::AcquireTupleData(
+    int64_t tid, const RowBatch& src, MemPool* tuple_data_pool) {
+  if (tuple_data_pool->total_reserved_bytes() > 0) {
+    std::unique_ptr<RowBatch> dest =
+        make_unique<RowBatch>(src.row_desc(), src.capacity(), &mem_tracker_);
+    dest->tuple_data_pool()->AcquireData(tuple_data_pool, false);
+    recycled_batches_queues_[tid % num_svc_threads_].Insert(move(dest));
+  }
 }
 
 }
