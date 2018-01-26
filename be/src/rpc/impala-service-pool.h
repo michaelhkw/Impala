@@ -27,30 +27,36 @@
 #include "kudu/rpc/rpc_service.h"
 #include "kudu/rpc/service_queue.h"
 #include "kudu/util/status.h"
+#include "util/blocking-queue.h"
 #include "util/histogram-metric.h"
 #include "util/thread.h"
 
 namespace impala {
 
-// A pool of threads that handle new incoming RPC calls.
-// Also includes a queue that calls get pushed onto for handling by the pool.
+/// A pool of threads that handle new incoming RPC calls.
+/// Also includes a queue that calls get pushed onto for handling by the pool.
 class ImpalaServicePool : public kudu::rpc::RpcService {
  public:
-  ImpalaServicePool(std::unique_ptr<kudu::rpc::ServiceIf> service,
-              const scoped_refptr<kudu::MetricEntity>& metric_entity,
-              size_t service_queue_length);
+  /// XXX
+  typedef boost::function<void()> PeriodicCallbackFn;
+
+  /// XXX
+  ImpalaServicePool(kudu::rpc::ServiceIf* service,
+      const scoped_refptr<kudu::MetricEntity>& metric_entity,
+      size_t service_queue_length, PeriodicCallbackFn cb, int64_t period_us);
+
   virtual ~ImpalaServicePool();
 
-  // Start up the thread pool.
+  /// Start up the thread pool.
   virtual Status Init(int num_threads);
 
-  // Shut down the queue and the thread pool.
+  /// Shut down the queue and the thread pool.
   virtual void Shutdown();
 
   kudu::rpc::RpcMethodInfo* LookupMethod(const kudu::rpc::RemoteMethod& method) override;
 
   virtual kudu::Status
-      QueueInboundCall(gscoped_ptr<kudu::rpc::InboundCall> call) OVERRIDE;
+      QueueInboundCall(gscoped_ptr<kudu::rpc::InboundCall> call) override;
 
   const std::string service_name() const;
 
@@ -58,9 +64,10 @@ class ImpalaServicePool : public kudu::rpc::RpcService {
   void RunThread();
   void RejectTooBusy(kudu::rpc::InboundCall* c);
 
-  std::unique_ptr<kudu::rpc::ServiceIf> service_;
-  std::vector<std::unique_ptr<Thread> > threads_;
-  kudu::rpc::LifoServiceQueue service_queue_;
+  /// Not owned.
+  kudu::rpc::ServiceIf* service_;
+  std::vector<std::unique_ptr<Thread>> threads_;
+  BlockingQueue<kudu::rpc::InboundCall*> service_queue_;
 
   // TODO: Display these metrics in the debug webpage. IMPALA-6269
   // Number of RPCs that timed out while waiting in the service queue.
@@ -77,6 +84,9 @@ class ImpalaServicePool : public kudu::rpc::RpcService {
   // TODO: This seems implausible given our current usage pattern. Consider removing lock.
   boost::mutex shutdown_lock_;
   bool closing_ = false;
+
+  const PeriodicCallbackFn cb_;
+  const int64_t period_us_;
 
   DISALLOW_COPY_AND_ASSIGN(ImpalaServicePool);
 };

@@ -23,7 +23,10 @@
 #include <boost/thread/thread.hpp>
 
 #include "kudu/rpc/rpc_context.h"
+#include "kudu/rpc/rpc_controller.h"
 
+#include "rpc/rpc-mgr.inline.h"
+#include "runtime/exec-env.h"
 #include "runtime/krpc-data-stream-recvr.h"
 #include "runtime/raw-value.inline.h"
 #include "runtime/row-batch.h"
@@ -34,6 +37,7 @@
 #include "util/uid-util.h"
 
 #include "gen-cpp/data_stream_service.pb.h"
+#include "gen-cpp/data_stream_service.proxy.h"
 
 #include "common/names.h"
 
@@ -49,11 +53,13 @@ const int32_t STREAM_EXPIRATION_TIME_MS = 300 * 1000;
 
 DECLARE_bool(use_krpc);
 DECLARE_int32(datastream_sender_timeout_ms);
+DECLARE_int32(datastream_service_num_svc_threads);
 DEFINE_int32(datastream_service_num_deserialization_threads, 16,
     "Number of threads for deserializing RPC requests deferred due to the receiver "
     "not ready or the soft limit of the receiver is reached.");
 
 using boost::mutex;
+using kudu::rpc::RpcController;
 
 namespace impala {
 
@@ -254,27 +260,6 @@ void KrpcDataStreamMgr::CloseSender(const EndDataStreamRequestPB* request,
   if (LIKELY(recvr != nullptr)) recvr->RemoveSender(request->sender_id());
   Status::OK().ToProto(response->mutable_status());
   rpc_context->RespondSuccess();
-
-  {
-    // TODO: Move this to maintenance thread.
-    // Remove any closed streams that have been in the cache for more than
-    // STREAM_EXPIRATION_TIME_MS.
-    lock_guard<mutex> l(lock_);
-    ClosedStreamMap::iterator it = closed_stream_expirations_.begin();
-    int64_t now = MonotonicMillis();
-    int32_t before = closed_stream_cache_.size();
-    while (it != closed_stream_expirations_.end() && it->first < now) {
-      closed_stream_cache_.erase(it->second);
-      closed_stream_expirations_.erase(it++);
-    }
-    DCHECK_EQ(closed_stream_cache_.size(), closed_stream_expirations_.size());
-    int32_t after = closed_stream_cache_.size();
-    if (before != after) {
-      VLOG_QUERY << "Reduced stream ID cache from " << before << " items, to " << after
-                 << ", eviction took: "
-                 << PrettyPrinter::Print(MonotonicMillis() - now, TUnit::TIME_MS);
-    }
-  }
 }
 
 Status KrpcDataStreamMgr::DeregisterRecvr(
@@ -375,6 +360,27 @@ void KrpcDataStreamMgr::Maintenance() {
         RespondToTimedOutSender<EndDataStreamCtx, EndDataStreamRequestPB>(ctx);
       }
     }
+
+    {
+      // Remove any closed streams that have been in the cache for more than
+      // STREAM_EXPIRATION_TIME_MS.
+      lock_guard<mutex> l(lock_);
+      ClosedStreamMap::iterator it = closed_stream_expirations_.begin();
+      int64_t now = MonotonicMillis();
+      int32_t before = closed_stream_cache_.size();
+      while (it != closed_stream_expirations_.end() && it->first < now) {
+        closed_stream_cache_.erase(it->second);
+        closed_stream_expirations_.erase(it++);
+      }
+      DCHECK_EQ(closed_stream_cache_.size(), closed_stream_expirations_.size());
+      int32_t after = closed_stream_cache_.size();
+      if (before != after) {
+        VLOG(2) << "Reduced stream ID cache from " << before << " items, to " << after
+                << ", eviction took: "
+                << PrettyPrinter::Print(MonotonicMillis() - now, TUnit::TIME_MS);
+      }
+    }
+
     bool timed_out = false;
     // Wait for 10s
     shutdown_promise_.Get(10000, &timed_out);

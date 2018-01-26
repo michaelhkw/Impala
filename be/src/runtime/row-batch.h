@@ -149,7 +149,7 @@ class RowBatch {
   /// from the row batch's MemPool tracked by 'mem_tracker'.
   RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
       const kudu::Slice& input_tuple_data, const kudu::Slice& input_tuple_offsets,
-      MemTracker* mem_tracker);
+      MemTracker* mem_tracker, int64_t tid);
 
   /// Releases all resources accumulated at this row batch.  This includes
   ///  - tuple_ptrs
@@ -186,6 +186,11 @@ class RowBatch {
     num_rows_ = num_rows;
   }
 
+  int64_t ALWAYS_INLINE GetMemUsage() const {
+    return attached_buffer_bytes_ + tuple_data_pool_.total_allocated_bytes() +
+        acquired_data_pools_bytes_;
+  }
+
   /// Returns true if the row batch has filled rows up to its capacity or has accumulated
   /// enough memory. The memory calculation includes the tuple data pool and any
   /// auxiliary memory attached to the row batch.
@@ -195,8 +200,7 @@ class RowBatch {
     // MarkFlushResources().
     DCHECK((!needs_deep_copy_ && flush_ == FlushMode::NO_FLUSH_RESOURCES)
         || num_rows_ == capacity_);
-    int64_t mem_usage = attached_buffer_bytes_ + tuple_data_pool_.total_allocated_bytes();
-    return num_rows_ == capacity_ || mem_usage >= AT_CAPACITY_MEM_USAGE;
+    return num_rows_ == capacity_ || GetMemUsage() >= AT_CAPACITY_MEM_USAGE;
   }
 
   TupleRow* ALWAYS_INLINE GetRow(int row_idx) {
@@ -445,6 +449,12 @@ class RowBatch {
   void Deserialize(const kudu::Slice& input_tuple_offsets,
       const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed);
 
+  /// XXX
+  void FreeTupleDataPool(int64_t tid, MemPool* tuple_data_pool);
+
+  /// XXX
+  void AcquireTupleDataPool(int64_t tid, MemPool* tuple_data_pool);
+
   typedef FixedSizeHashTable<Tuple*, int> DedupMap;
 
   /// The total size of all data represented in this row batch (tuples and referenced
@@ -490,8 +500,14 @@ class RowBatch {
   /// Total bytes of BufferPool buffers attached to this batch.
   int64_t attached_buffer_bytes_;
 
+  ///
+  int64_t acquired_data_pools_bytes_;
+
   /// holding (some of the) data referenced by rows
   MemPool tuple_data_pool_;
+
+  /// XXX
+  std::unordered_map<int64_t, std::unique_ptr<MemPool>> acquired_data_pools_;
 
   // Less frequently used members that are not accessed on performance-critical paths
   // should go below here.
@@ -501,6 +517,11 @@ class RowBatch {
   const RowDescriptor* row_desc_;
 
   MemTracker* mem_tracker_;  // not owned
+
+  /// The thread id of the service thread which owns the row batch. Transfer this batch
+  /// back to the owning thread via DataStreamService::AcquireState() during Reset() if
+  /// it's not INVALID_THREAD_ID.
+  const int64_t owning_tid_;
 
   struct BufferInfo {
     BufferPool::ClientHandle* client;

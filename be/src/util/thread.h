@@ -126,6 +126,9 @@ class Thread {
   /// support retrieving the tid, returns Thread::INVALID_THREAD_ID.
   int64_t tid() const { return tid_; }
 
+  /// XXX
+  static int64_t current_tid() { return current_tid_; }
+
   static const int64_t INVALID_THREAD_ID = -1;
 
  private:
@@ -151,6 +154,9 @@ class Thread {
   /// constructor returns from StartThread() the tid_ is guaranteed to be set either to a
   /// non-negative integer, or INVALID_THREAD_ID.
   int64_t tid_;
+
+  /// Thread local storage of the current thread id. Used by CurrentThreadId().
+  static __thread int64_t current_tid_;
 
   /// Creates a new thread and starts the thread running SuperviseThread(). It waits
   /// for notification from the started thread that initialisation is complete and

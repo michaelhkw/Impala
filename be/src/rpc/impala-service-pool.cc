@@ -23,7 +23,9 @@
 #include <string>
 #include <vector>
 
+#include "common/status.h"
 #include "exec/kudu-util.h"
+#include "gutil/walltime.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/join.h"
@@ -36,7 +38,6 @@
 #include "kudu/util/trace.h"
 
 #include "common/names.h"
-#include "common/status.h"
 
 METRIC_DEFINE_histogram(server, impala_unused,
     "RPC Queue Time",
@@ -46,13 +47,14 @@ METRIC_DEFINE_histogram(server, impala_unused,
 
 namespace impala {
 
-ImpalaServicePool::ImpalaServicePool(std::unique_ptr<kudu::rpc::ServiceIf> service,
-                         const scoped_refptr<kudu::MetricEntity>& entity,
-                         size_t service_queue_length)
-  : service_(std::move(service)),
+ImpalaServicePool::ImpalaServicePool(kudu::rpc::ServiceIf* service,
+    const scoped_refptr<kudu::MetricEntity>& entity, size_t service_queue_length,
+    PeriodicCallbackFn cb, int64_t period_ms)
+  : service_(service),
     service_queue_(service_queue_length),
-    unused_histogram_(METRIC_impala_unused.Instantiate(entity)) {
-
+    unused_histogram_(METRIC_impala_unused.Instantiate(entity)),
+    cb_(cb),
+    period_us_(period_ms * MICROS_PER_MILLI) {
 }
 
 ImpalaServicePool::~ImpalaServicePool() {
@@ -82,13 +84,13 @@ void ImpalaServicePool::Shutdown() {
 
   // Now we must drain the service queue.
   kudu::Status status = kudu::Status::ServiceUnavailable("Service is shutting down");
-  std::unique_ptr<kudu::rpc::InboundCall> incoming;
-  while (service_queue_.BlockingGet(&incoming)) {
-    incoming.release()->RespondFailure(
+  kudu::rpc::InboundCall* c;
+  while (service_queue_.BlockingGet(&c)) {
+    c->RespondFailure(
         kudu::rpc::ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, status);
   }
-
   service_->Shutdown();
+  service_ = nullptr;
 }
 
 void ImpalaServicePool::RejectTooBusy(kudu::rpc::InboundCall* c) {
@@ -98,12 +100,10 @@ void ImpalaServicePool::RejectTooBusy(kudu::rpc::InboundCall* c) {
                  c->remote_method().method_name(),
                  service_->service_name(),
                  c->remote_address().ToString(),
-                 service_queue_.max_size());
+                 service_queue_.max_elements());
   rpcs_queue_overflow_.Add(1);
   c->RespondFailure(kudu::rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY,
                     kudu::Status::ServiceUnavailable(err_msg));
-  VLOG(1) << err_msg << " Contents of service queue:\n"
-          << service_queue_.ToString();
 }
 
 kudu::rpc::RpcMethodInfo* ImpalaServicePool::LookupMethod(
@@ -124,27 +124,16 @@ kudu::Status ImpalaServicePool::QueueInboundCall(
 
   if (!unsupported_features.empty()) {
     c->RespondUnsupportedFeature(unsupported_features);
-    return kudu::Status::NotSupported("call requires unsupported application feature flags",
-                                JoinMapped(unsupported_features,
-                                           [] (uint32_t flag) { return std::to_string(flag); },
-                                           ", "));
+    return kudu::Status::NotSupported("call requires unsupported application feature "
+        "flags", JoinMapped(unsupported_features,
+         [] (uint32_t flag) { return std::to_string(flag); }, ", "));
   }
 
   TRACE_TO(c->trace(), "Inserting onto call queue"); // NOLINT(*)
 
   // Queue message on service queue
-  boost::optional<kudu::rpc::InboundCall*> evicted;
-  auto queue_status = service_queue_.Put(c, &evicted);
-  if (queue_status == kudu::rpc::QueueStatus::QUEUE_FULL) {
-    RejectTooBusy(c);
-    return kudu::Status::OK();
-  }
-
-  if (PREDICT_FALSE(evicted != boost::none)) {
-    RejectTooBusy(*evicted);
-  }
-
-  if (PREDICT_TRUE(queue_status == kudu::rpc::QueueStatus::QUEUE_SUCCESS)) {
+  bool success = service_queue_.TryPut(c);
+  if (LIKELY(success)) {
     // NB: do not do anything with 'c' after it is successfully queued --
     // a service thread may have already dequeued it, processed it, and
     // responded by this point, in which case the pointer would be invalid.
@@ -152,38 +141,41 @@ kudu::Status ImpalaServicePool::QueueInboundCall(
   }
 
   kudu::Status status = kudu::Status::OK();
-  if (queue_status == kudu::rpc::QueueStatus::QUEUE_SHUTDOWN) {
+  if (UNLIKELY(service_queue_.IsShutdown())) {
     status = kudu::Status::ServiceUnavailable("Service is shutting down");
     c->RespondFailure(kudu::rpc::ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, status);
   } else {
-    status = kudu::Status::RuntimeError(
-        Substitute("Unknown error from BlockingQueue: $0", queue_status));
-    c->RespondFailure(kudu::rpc::ErrorStatusPB::FATAL_UNKNOWN, status);
+    RejectTooBusy(c);
   }
   return status;
 }
 
 void ImpalaServicePool::RunThread() {
   while (true) {
-    std::unique_ptr<kudu::rpc::InboundCall> incoming;
-    if (!service_queue_.BlockingGet(&incoming)) {
-      VLOG(1) << "ImpalaServicePool: messenger shutting down.";
-      return;
+    kudu::rpc::InboundCall* c = nullptr;
+    if (UNLIKELY(!service_queue_.BlockingGetWithTimeout(&c, period_us_))) {
+      if (service_queue_.IsShutdown()) {
+        VLOG(1) << "ImpalaServicePool: messenger shutting down.";
+        return;
+      }
+      if (cb_ != 0) cb_();
+      continue;
     }
 
+    std::unique_ptr<kudu::rpc::InboundCall> incoming(c);
     // We need to call RecordHandlingStarted() to update the InboundCall timing.
     incoming->RecordHandlingStarted(unused_histogram_);
     ADOPT_TRACE(incoming->trace());
 
     if (PREDICT_FALSE(incoming->ClientTimedOut())) {
-      TRACE_TO(incoming->trace(), "Skipping call since client already timed out"); // NOLINT(*)
+      TRACE_TO(incoming->trace(), "Skipping call since client already timed out");
       rpcs_timed_out_in_queue_.Add(1);
 
       // Respond as a failure, even though the client will probably ignore
       // the response anyway.
       incoming->RespondFailure(
-        kudu::rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY,
-        kudu::Status::TimedOut("Call waited in the queue past client deadline"));
+          kudu::rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY,
+          kudu::Status::TimedOut("Call waited in the queue past client deadline"));
 
       // Must release since RespondFailure above ends up taking ownership
       // of the object.

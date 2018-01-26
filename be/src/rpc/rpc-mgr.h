@@ -19,6 +19,7 @@
 #define IMPALA_RPC_RPC_MGR_H
 
 #include "common/status.h"
+#include "gutil/walltime.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/result_tracker.h"
 #include "kudu/util/metrics.h"
@@ -95,6 +96,7 @@ namespace impala {
 /// Inbound connection set-up is handled by a small fixed-size pool of 'acceptor'
 /// threads. The number of threads that accept new TCP connection requests to the service
 /// port is configurable via FLAGS_acceptor_threads.
+///
 class RpcMgr {
  public:
   /// Initializes the reactor threads, and prepares for sending outbound RPC requests.
@@ -122,7 +124,8 @@ class RpcMgr {
   ///
   /// It is an error to call this after StartServices() has been called.
   Status RegisterService(int32_t num_service_threads, int32_t service_queue_depth,
-      std::unique_ptr<kudu::rpc::ServiceIf> service_ptr) WARN_UNUSED_RESULT;
+      kudu::rpc::ServiceIf* service, ImpalaServicePool::PeriodicCallbackFn cb = 0,
+      int64_t period_ms = LLONG_MAX / MICROS_PER_MILLI) WARN_UNUSED_RESULT;
 
   /// Creates a new proxy for a remote service of type P at location 'address', and places
   /// it in 'proxy'. 'P' must descend from kudu::rpc::ServiceIf. Note that 'address' must

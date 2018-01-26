@@ -19,6 +19,7 @@
 #ifndef IMPALA_UTIL_BLOCKING_QUEUE_H
 #define IMPALA_UTIL_BLOCKING_QUEUE_H
 
+#include <boost/chrono/duration.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <deque>
@@ -63,7 +64,7 @@ class BlockingQueue : public CacheLineAligned {
   /// Returns false if we were shut down prior to getting the element, and there
   /// are no more elements available.
   bool BlockingGet(T* out) {
-    boost::unique_lock<boost::mutex> read_lock(get_lock_);
+    boost::unique_lock<boost::timed_mutex> read_lock(get_lock_);
 
     if (UNLIKELY(get_list_.empty())) {
       MonotonicStopWatch timer;
@@ -105,6 +106,73 @@ class BlockingQueue : public CacheLineAligned {
     return true;
   }
 
+  /// Gets an element from the queue, waiting indefinitely for one to become available.
+  /// Returns false if we were shut down prior to getting the element, and there
+  /// are no more elements available.
+  bool BlockingGetWithTimeout(T* out, int64_t timeout_micros) {
+    boost::unique_lock<boost::timed_mutex> read_lock(get_lock_,
+        boost::chrono::microseconds(timeout_micros));
+    if (UNLIKELY(!read_lock.owns_lock())) return false;
+    if (UNLIKELY(get_list_.empty())) {
+      MonotonicStopWatch timer;
+      // Block off writers while swapping 'get_list_' with 'put_list_'.
+      boost::unique_lock<boost::mutex> write_lock(put_lock_);
+      timespec abs_time;
+      TimeFromNowMicros(timeout_micros, &abs_time);
+      bool notified = true;
+      while (put_list_.empty() && notified) {
+        DCHECK(get_list_.empty());
+        if (UNLIKELY(shutdown_)) return false;
+        // Note that it's intentional to signal the writer while holding 'put_lock_' to
+        // avoid the race in which the writer may be signalled between when it checks
+        // the queue size and when it calls Wait() in BlockingGet(). NotifyAll() is not
+        // used here to avoid thundering herd which leads to contention (e.g. InitTuple()
+        // in scanner).
+        put_cv_.NotifyOne();
+        // Sleep with 'get_lock_' held to block off other readers which cannot
+        // make progress anyway.
+        timer.Start();
+        notified = get_cv_.WaitUntil(write_lock, abs_time);
+        timer.Stop();
+      }
+      if (UNLIKELY(!notified)) return false;
+      DCHECK(!put_list_.empty());
+      put_list_.swap(get_list_);
+      get_list_size_.Store(get_list_.size());
+      write_lock.unlock();
+      total_get_wait_time_ += timer.ElapsedTime();
+    }
+
+    DCHECK(!get_list_.empty());
+    *out = std::move(get_list_.front());
+    get_list_.pop_front();
+    get_list_size_.Store(get_list_.size());
+    read_lock.unlock();
+    // Note that there is a race with any writer if NotifyOne() is called between when
+    // a writer checks the queue size and when it calls put_cv_.Wait(). If this race
+    // occurs, a writer can stay blocked even if the queue is not full until the next
+    // BlockingGet(). The race is benign correctness wise as BlockingGet() will always
+    // notify a writer with 'put_lock_' held when both lists are empty.
+    put_cv_.NotifyOne();
+    return true;
+  }
+
+  /// Puts an element into the queue, waiting indefinitely until there is space. Rvalues
+  /// are moved into the queue, lvalues are copied. If the queue is shut down, returns
+  /// false. V is a type that is compatible with T; that is, objects of type V can be
+  /// inserted into the queue.
+  template <typename V>
+  bool TryPut(V&& val) {
+    MonotonicStopWatch timer;
+    boost::unique_lock<boost::mutex> write_lock(put_lock_);
+    if (SizeLocked(write_lock) >= max_elements_ || shutdown_) return false;
+    DCHECK_LT(put_list_.size(), max_elements_);
+    Put(std::forward<V>(val));
+    write_lock.unlock();
+    get_cv_.NotifyOne();
+    return true;
+  }
+
   /// Puts an element into the queue, waiting indefinitely until there is space. Rvalues
   /// are moved into the queue, lvalues are copied. If the queue is shut down, returns
   /// false. V is a type that is compatible with T; that is, objects of type V can be
@@ -138,13 +206,13 @@ class BlockingQueue : public CacheLineAligned {
   bool BlockingPutWithTimeout(V&& val, int64_t timeout_micros) {
     MonotonicStopWatch timer;
     boost::unique_lock<boost::mutex> write_lock(put_lock_);
-    boost::system_time wtime = boost::get_system_time() +
-        boost::posix_time::microseconds(timeout_micros);
+    timespec abs_time;
+    TimeFromNowMicros(timeout_micros, &abs_time);
     bool notified = true;
     while (SizeLocked(write_lock) >= max_elements_ && !shutdown_ && notified) {
       timer.Start();
       // Wait until we're notified or until the timeout expires.
-      notified = put_cv_.WaitUntil(write_lock, wtime);
+      notified = put_cv_.WaitUntil(write_lock, abs_time);
       timer.Stop();
     }
     total_put_wait_time_ += timer.ElapsedTime();
@@ -173,6 +241,10 @@ class BlockingQueue : public CacheLineAligned {
     put_cv_.NotifyAll();
   }
 
+  bool IsShutdown() const {
+    return shutdown_;
+  }
+
   uint32_t Size() const {
     boost::unique_lock<boost::mutex> write_lock(put_lock_);
     return SizeLocked(write_lock);
@@ -180,7 +252,7 @@ class BlockingQueue : public CacheLineAligned {
 
   int64_t total_get_wait_time() const {
     // Hold lock to make sure the value read is consistent (i.e. no torn read).
-    boost::lock_guard<boost::mutex> read_lock(get_lock_);
+    boost::lock_guard<boost::timed_mutex> read_lock(get_lock_);
     return total_get_wait_time_;
   }
 
@@ -188,6 +260,10 @@ class BlockingQueue : public CacheLineAligned {
     // Hold lock to make sure the value read is consistent (i.e. no torn read).
     boost::lock_guard<boost::mutex> write_lock(put_lock_);
     return total_put_wait_time_;
+  }
+
+  int max_elements() const {
+    return max_elements_;
   }
 
  private:
@@ -227,7 +303,7 @@ class BlockingQueue : public CacheLineAligned {
   int64_t pad_;
 
   /// Guards against concurrent access to 'get_list_'.
-  mutable boost::mutex get_lock_;
+  mutable boost::timed_mutex get_lock_;
 
   /// The queue of items to be consumed by BlockingGet(). Guarded by 'get_lock_'.
   std::deque<T> get_list_;

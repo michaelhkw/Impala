@@ -25,6 +25,7 @@
 #include "runtime/mem-tracker.h"
 #include "runtime/string-value.h"
 #include "runtime/tuple-row.h"
+#include "service/data-stream-service.h"
 #include "util/compress.h"
 #include "util/debug-util.h"
 #include "util/decompress.h"
@@ -48,9 +49,11 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, int capacity, MemTracker* mem_
     needs_deep_copy_(false),
     num_tuples_per_row_(row_desc->tuple_descriptors().size()),
     attached_buffer_bytes_(0),
+    acquired_data_pools_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(mem_tracker),
+    owning_tid_(Thread::INVALID_THREAD_ID) {
   DCHECK(mem_tracker_ != NULL);
   DCHECK_GT(capacity, 0);
   tuple_ptrs_size_ = capacity * num_tuples_per_row_ * sizeof(Tuple*);
@@ -75,9 +78,11 @@ RowBatch::RowBatch(
     needs_deep_copy_(false),
     num_tuples_per_row_(input_batch.row_tuples.size()),
     attached_buffer_bytes_(0),
+    acquired_data_pools_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(mem_tracker),
+    owning_tid_(Thread::INVALID_THREAD_ID) {
   DCHECK(mem_tracker_ != nullptr);
   kudu::Slice tuple_data =
       kudu::Slice(input_batch.tuple_data.c_str(), input_batch.tuple_data.size());
@@ -94,16 +99,18 @@ RowBatch::RowBatch(
 
 RowBatch::RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
     const kudu::Slice& tuple_offsets, const kudu::Slice& tuple_data,
-    MemTracker* mem_tracker)
+    MemTracker* mem_tracker, int64_t tid)
   : num_rows_(header.num_rows()),
     capacity_(header.num_rows()),
     flush_(FlushMode::NO_FLUSH_RESOURCES),
     needs_deep_copy_(false),
     num_tuples_per_row_(header.num_tuples_per_row()),
     attached_buffer_bytes_(0),
+    acquired_data_pools_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
-    mem_tracker_(mem_tracker) {
+    mem_tracker_(mem_tracker),
+    owning_tid_(tid) {
   DCHECK(mem_tracker_ != nullptr);
   const CompressionType& compression_type = header.compression_type();
   DCHECK(compression_type == CompressionType::NONE ||
@@ -183,6 +190,11 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
 
 RowBatch::~RowBatch() {
   tuple_data_pool_.FreeAll();
+  FreeTupleDataPool(owning_tid_, &tuple_data_pool_);
+  for (const auto& entry : acquired_data_pools_) {
+    FreeTupleDataPool(entry.first, entry.second.get());
+  }
+  acquired_data_pools_.clear();
   for (BufferInfo& buffer_info : buffers_) {
     ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
         buffer_info.client, &buffer_info.buffer);
@@ -361,11 +373,26 @@ void RowBatch::AddBuffer(BufferPool::ClientHandle* client,
   if (flush == FlushMode::FLUSH_RESOURCES) MarkFlushResources();
 }
 
+void RowBatch::FreeTupleDataPool(int64_t tid, MemPool* tuple_data_pool) {
+  if (tid != Thread::INVALID_THREAD_ID) {
+    DataStreamService* data_svc = ExecEnv::GetInstance()->data_svc();
+    data_svc->AcquireTupleData(tid, *this, tuple_data_pool);
+  } else {
+    // TODO: Change this to Clear() and investigate the repercussions.
+    tuple_data_pool->FreeAll();
+  }
+  DCHECK_EQ(0, tuple_data_pool->total_allocated_bytes());
+}
+
 void RowBatch::Reset() {
   num_rows_ = 0;
   capacity_ = tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
-  // TODO: Change this to Clear() and investigate the repercussions.
-  tuple_data_pool_.FreeAll();
+  FreeTupleDataPool(owning_tid_, &tuple_data_pool_);
+  for (const auto& entry : acquired_data_pools_) {
+    FreeTupleDataPool(entry.first, entry.second.get());
+  }
+  acquired_data_pools_.clear();
+  acquired_data_pools_bytes_ = 0;
   for (BufferInfo& buffer_info : buffers_) {
     ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
         buffer_info.client, &buffer_info.buffer);
@@ -376,8 +403,19 @@ void RowBatch::Reset() {
   needs_deep_copy_ = false;
 }
 
+void RowBatch::AcquireTupleDataPool(int64_t tid, MemPool* tuple_data_pool) {
+  if (acquired_data_pools_.find(tid) == acquired_data_pools_.end()) {
+    acquired_data_pools_.emplace(tid, make_unique<MemPool>(mem_tracker_));
+  }
+  acquired_data_pools_bytes_ += tuple_data_pool->total_allocated_bytes();
+  acquired_data_pools_[tid]->AcquireData(tuple_data_pool, false);
+}
+
 void RowBatch::TransferResourceOwnership(RowBatch* dest) {
-  dest->tuple_data_pool_.AcquireData(&tuple_data_pool_, false);
+  dest->AcquireTupleDataPool(owning_tid_, &tuple_data_pool_);
+  for (auto& entry : acquired_data_pools_) {
+    dest->AcquireTupleDataPool(entry.first, entry.second.get());
+  }
   for (BufferInfo& buffer_info : buffers_) {
     dest->AddBuffer(
         buffer_info.client, std::move(buffer_info.buffer), FlushMode::NO_FLUSH_RESOURCES);
