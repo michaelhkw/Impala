@@ -236,23 +236,25 @@ class MemTracker {
   }
 
   /// Returns true if a valid limit of this tracker or one of its ancestors is
-  /// exceeded.
-  bool AnyLimitExceeded() {
+  /// exceeded. If 'skip_gc' is true, GcMemory() will not be called when exceeding
+  /// any MemTracker's limit.
+  bool AnyLimitExceeded(bool skip_gc = false) {
     for (MemTracker* tracker : limit_trackers_) {
-      if (tracker->LimitExceeded()) return true;
+      if (tracker->LimitExceeded(skip_gc)) return true;
     }
     return false;
   }
 
-  /// If this tracker has a limit, checks the limit and attempts to free up some memory if
-  /// the limit is exceeded by calling any added GC functions. Returns true if the limit is
-  /// exceeded after calling the GC functions. Returns false if there is no limit.
-  bool LimitExceeded() {
+  /// If this tracker has a limit, checks the limit. By default, attempts to free up some
+  /// memory if the limit is exceeded by calling any added GC functions unless 'skip_gc'
+  /// is true. Returns true if the limit is exceeded after calling the GC functions.
+  /// Returns false if there is no limit.
+  bool LimitExceeded(bool skip_gc = false) {
     if (UNLIKELY(CheckLimitExceeded())) {
       if (bytes_over_limit_metric_ != NULL) {
         bytes_over_limit_metric_->SetValue(consumption() - limit_);
       }
-      return GcMemory(limit_);
+      return skip_gc || GcMemory(limit_);
     }
     return false;
   }
@@ -367,6 +369,7 @@ class MemTracker {
  private:
   friend class PoolMemTrackerRegistry;
 
+  /// Returns true if the current memory tracker's limit is exceeded.
   bool CheckLimitExceeded() const { return limit_ >= 0 && limit_ < consumption(); }
 
   /// If consumption is higher than max_consumption, attempts to free memory by calling
