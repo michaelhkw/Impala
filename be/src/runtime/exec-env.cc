@@ -444,8 +444,9 @@ void ExecEnv::InitBufferPool(int64_t min_buffer_size, int64_t capacity,
   // Aggressive decommit is required so that unused pages in the TCMalloc page heap are
   // not backed by physical pages and do not contribute towards memory consumption.
   // Enable it in TCMalloc before InitBufferPool().
-  MallocExtension::instance()->SetNumericProperty(
-      "tcmalloc.aggressive_memory_decommit", 1);
+  bool retval = MallocExtension::instance()->SetNumericProperty(
+      "tcmalloc.aggressive_memory_decommit", 0);
+  DCHECK(retval);
 #endif
   buffer_pool_.reset(new BufferPool(min_buffer_size, capacity, clean_pages_limit));
   buffer_reservation_.reset(new ReservationTracker());

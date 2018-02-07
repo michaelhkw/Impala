@@ -51,7 +51,7 @@ SystemAllocator::SystemAllocator(int64_t min_buffer_len)
   size_t aggressive_decommit_enabled;
   MallocExtension::instance()->GetNumericProperty(
       "tcmalloc.aggressive_memory_decommit", &aggressive_decommit_enabled);
-  CHECK_EQ(true, aggressive_decommit_enabled);
+  CHECK_EQ(false, aggressive_decommit_enabled);
 #endif
 }
 
