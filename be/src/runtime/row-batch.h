@@ -143,13 +143,12 @@ class RowBatch {
   RowBatch(const RowDescriptor* row_desc, const TRowBatch& input_batch,
       MemTracker* tracker);
 
-  /// Populate a row batch from the serialized row batch header, decompress / copy
-  /// the tuple's data into a buffer and convert all offsets in 'tuple_offsets' back
-  /// into pointers into the tuple data's buffer. The tuple data's buffer is allocated
-  /// from the row batch's MemPool tracked by 'mem_tracker'.
-  RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
+  /// XXX
+  static Status Create(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
       const kudu::Slice& input_tuple_data, const kudu::Slice& input_tuple_offsets,
-      MemTracker* mem_tracker);
+      MemTracker* mem_tracker, BufferPool::ClientHandle* buffer_pool_client,
+      AtomicInt64* reservation_counter, std::unique_ptr<RowBatch>* row_batch_ptr)
+      WARN_UNUSED_RESULT;
 
   /// Releases all resources accumulated at this row batch.  This includes
   ///  - tuple_ptrs
@@ -405,6 +404,17 @@ class RowBatch {
   friend class RowBatchSerializeBenchmark;
   friend class RowBatchSerializeTest;
 
+  /// Populate a row batch from the serialized row batch header, decompress / copy
+  /// the tuple's data into a buffer and convert all offsets in 'tuple_offsets' back
+  /// into pointers into the tuple data's buffer. The tuple data's buffer is allocated
+  /// from the row batch's MemPool tracked by 'mem_tracker'.
+  RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
+      const kudu::Slice& input_tuple_data, const kudu::Slice& input_tuple_offsets,
+      MemTracker* mem_tracker);
+
+  /// XXX
+  void FreeBuffers();
+
   /// Decide whether to do full tuple deduplication based on row composition. Full
   /// deduplication is enabled only when there is risk of the serialized size being
   /// much larger than in-memory size due to non-adjacent duplicate tuples.
@@ -442,8 +452,10 @@ class RowBatch {
   /// 'is_compressed': True if 'input_tuple_data' is compressed.
   ///
   /// TODO: clean this up once the thrift RPC implementation is removed.
-  void Deserialize(const kudu::Slice& input_tuple_offsets,
-      const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed);
+  Status Deserialize(const kudu::Slice& input_tuple_offsets,
+      const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed,
+      BufferPool::ClientHandle* client = nullptr,
+      AtomicInt64* reservation_counter = nullptr) WARN_UNUSED_RESULT;
 
   typedef FixedSizeHashTable<Tuple*, int> DedupMap;
 
@@ -484,7 +496,7 @@ class RowBatch {
   /// more performant that allocating the pointers from 'tuple_data_pool_' especially
   /// with SubplanNodes in the ExecNode tree because the tuple pointers are not
   /// transferred and do not have to be re-created in every Reset().
-  int tuple_ptrs_size_;
+  const int tuple_ptrs_size_;
   Tuple** tuple_ptrs_;
 
   /// Total bytes of BufferPool buffers attached to this batch.
@@ -503,12 +515,15 @@ class RowBatch {
   MemTracker* mem_tracker_;  // not owned
 
   struct BufferInfo {
-    BufferPool::ClientHandle* client;
+    BufferPool::ClientHandle* client = nullptr;
     BufferPool::BufferHandle buffer;
   };
 
   /// Pages attached to this row batch. See AddBuffer() for ownership semantics.
   std::vector<BufferInfo> buffers_;
+
+  /// XXX
+  std::unique_ptr<BufferInfo> tuple_ptrs_buffer_;
 
   /// String to write compressed tuple data to in Serialize().
   /// This is a string so we can swap() with the string in the serialized row batch

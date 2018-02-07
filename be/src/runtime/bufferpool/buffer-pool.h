@@ -239,6 +239,14 @@ class BufferPool : public CacheLineAligned {
   Status AllocateBuffer(
       ClientHandle* client, int64_t len, BufferHandle* handle) WARN_UNUSED_RESULT;
 
+  /// Like AllocateBuffer(), except tries to increase reservation on the client if
+  /// needed. If the reservation wasn't available, 'handle' isn't opened. This should
+  /// only be used for allocations where potential failure is expected. Generally
+  /// otherwise clients should reserve enough memory for their needs and allocate
+  /// out of that.
+  Status TryAllocateBuffer(
+      ClientHandle* client, int64_t len, BufferHandle* handle) WARN_UNUSED_RESULT;
+
   /// If 'handle' is open, close 'handle', free the buffer and decrease the reservation
   /// usage from 'client'. Idempotent. Safe to call concurrently with other operations
   /// for 'client', except for operations on the same 'handle'.

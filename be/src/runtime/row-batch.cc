@@ -47,13 +47,13 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, int capacity, MemTracker* mem_
     flush_(FlushMode::NO_FLUSH_RESOURCES),
     needs_deep_copy_(false),
     num_tuples_per_row_(row_desc->tuple_descriptors().size()),
+    tuple_ptrs_size_(capacity * num_tuples_per_row_ * sizeof(Tuple*)),
     attached_buffer_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
     mem_tracker_(mem_tracker) {
   DCHECK(mem_tracker_ != NULL);
   DCHECK_GT(capacity, 0);
-  tuple_ptrs_size_ = capacity * num_tuples_per_row_ * sizeof(Tuple*);
   DCHECK_GT(tuple_ptrs_size_, 0);
   // TODO: switch to Init() pattern so we can check memory limit and return Status.
   mem_tracker_->Consume(tuple_ptrs_size_);
@@ -74,11 +74,14 @@ RowBatch::RowBatch(
     flush_(FlushMode::NO_FLUSH_RESOURCES),
     needs_deep_copy_(false),
     num_tuples_per_row_(input_batch.row_tuples.size()),
+    tuple_ptrs_size_(num_rows_ * num_tuples_per_row_ * sizeof(Tuple*)),
     attached_buffer_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
     mem_tracker_(mem_tracker) {
   DCHECK(mem_tracker_ != nullptr);
+  DCHECK_EQ(num_tuples_per_row_, row_desc_->tuple_descriptors().size());
+  DCHECK_GT(tuple_ptrs_size_, 0);
   kudu::Slice tuple_data =
       kudu::Slice(input_batch.tuple_data.c_str(), input_batch.tuple_data.size());
   kudu::Slice tuple_offsets = kudu::Slice(
@@ -88,8 +91,8 @@ RowBatch::RowBatch(
   DCHECK(compression_type == THdfsCompression::NONE ||
       compression_type == THdfsCompression::LZ4)
       << "Unexpected compression type: " << input_batch.compression_type;
-  Deserialize(tuple_offsets, tuple_data, input_batch.uncompressed_size,
-      compression_type == THdfsCompression::LZ4);
+  discard_result(Deserialize(tuple_offsets, tuple_data, input_batch.uncompressed_size,
+      compression_type == THdfsCompression::LZ4));
 }
 
 RowBatch::RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
@@ -100,30 +103,49 @@ RowBatch::RowBatch(const RowDescriptor* row_desc, const RowBatchHeaderPB& header
     flush_(FlushMode::NO_FLUSH_RESOURCES),
     needs_deep_copy_(false),
     num_tuples_per_row_(header.num_tuples_per_row()),
+    tuple_ptrs_size_(num_rows_ * num_tuples_per_row_ * sizeof(Tuple*)),
     attached_buffer_bytes_(0),
     tuple_data_pool_(mem_tracker),
     row_desc_(row_desc),
     mem_tracker_(mem_tracker) {
   DCHECK(mem_tracker_ != nullptr);
-  const CompressionType& compression_type = header.compression_type();
-  DCHECK(compression_type == CompressionType::NONE ||
-      compression_type == CompressionType::LZ4)
-      << "Unexpected compression type: " << compression_type;
-  Deserialize(tuple_offsets, tuple_data, header.uncompressed_size(),
-      compression_type == CompressionType::LZ4);
+  DCHECK_EQ(num_tuples_per_row_, row_desc_->tuple_descriptors().size());
+  DCHECK_GT(tuple_ptrs_size_, 0);
 }
 
-void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
-    const kudu::Slice& input_tuple_data, int64_t uncompressed_size, bool is_compressed) {
-  // TODO: switch to Init() pattern so we can check memory limit and return Status.
-  DCHECK_EQ(num_tuples_per_row_, row_desc_->tuple_descriptors().size());
-  tuple_ptrs_size_ = num_rows_ * num_tuples_per_row_ * sizeof(Tuple*);
-  DCHECK_GT(tuple_ptrs_size_, 0);
-  mem_tracker_->Consume(tuple_ptrs_size_);
-  tuple_ptrs_ = reinterpret_cast<Tuple**>(malloc(tuple_ptrs_size_));
-  DCHECK(tuple_ptrs_ != nullptr);
+Status RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
+    const kudu::Slice& input_tuple_data, int64_t uncompressed_size,
+    bool is_compressed, BufferPool::ClientHandle* client,
+    AtomicInt64* reservation_counter) {
+  uint8_t* tuple_data = nullptr;
+  if (client != nullptr) {
+    BufferPool* buffer_pool = ExecEnv::GetInstance()->buffer_pool();
 
-  uint8_t* tuple_data;
+    // Allocate 'tuple_ptrs_'.
+    int64_t tuple_ptrs_len = BitUtil::RoundUpToPowerOfTwo(tuple_ptrs_size_);
+    tuple_ptrs_len = max(buffer_pool->min_buffer_len(), tuple_ptrs_len);
+    tuple_ptrs_buffer_.reset(new BufferInfo());
+    tuple_ptrs_buffer_->client = client;
+    RETURN_IF_ERROR(buffer_pool->TryAllocateBuffer(client, tuple_ptrs_len,
+        &(tuple_ptrs_buffer_->buffer)));
+    tuple_ptrs_ = reinterpret_cast<Tuple**>(tuple_ptrs_buffer_->buffer.data());
+
+    // Allocate 'tuple_data'.
+    int64_t buffer_len = BitUtil::RoundUpToPowerOfTwo(uncompressed_size);
+    buffer_len = max(buffer_pool->min_buffer_len(), buffer_len);
+    BufferPool::BufferHandle handle;
+    RETURN_IF_ERROR(buffer_pool->TryAllocateBuffer(client, buffer_len, &handle));
+    tuple_data = handle.data();
+    DCHECK_EQ(buffer_len, handle.len());
+    AddBuffer(client, move(handle), FlushMode::NO_FLUSH_RESOURCES);
+  } else {
+    mem_tracker_->Consume(tuple_ptrs_size_);
+    tuple_ptrs_ = reinterpret_cast<Tuple**>(malloc(tuple_ptrs_size_));
+    DCHECK(tuple_ptrs_ != nullptr);
+    tuple_data = tuple_data_pool_.Allocate(uncompressed_size);
+  }
+  DCHECK(tuple_data != nullptr);
+
   if (is_compressed) {
     // Decompress tuple data into data pool
     const uint8_t* compressed_data = input_tuple_data.data();
@@ -135,14 +157,13 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
     auto compressor_cleanup =
         MakeScopeExitTrigger([&decompressor]() { decompressor.Close(); });
 
-    DCHECK_NE(uncompressed_size, -1) << "RowBatch decompression failed";
-    tuple_data = tuple_data_pool_.Allocate(uncompressed_size);
     status = decompressor.ProcessBlock(
         true, compressed_size, compressed_data, &uncompressed_size, &tuple_data);
+    DCHECK_NE(uncompressed_size, -1) << "RowBatch decompression failed";
     DCHECK(status.ok()) << "RowBatch decompression failed.";
   } else {
     // Tuple data uncompressed, copy directly into data pool
-    tuple_data = tuple_data_pool_.Allocate(input_tuple_data.size());
+    DCHECK_EQ(uncompressed_size, input_tuple_data.size());
     memcpy(tuple_data, input_tuple_data.data(), input_tuple_data.size());
   }
 
@@ -161,7 +182,7 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
   }
 
   // Check whether we have slots that require offset-to-pointer conversion.
-  if (!row_desc_->HasVarlenSlots()) return;
+  if (!row_desc_->HasVarlenSlots()) return Status::OK();
 
   // For every unique tuple, convert string offsets contained in tuple data into
   // pointers. Tuples were serialized in the order we are deserializing them in,
@@ -179,17 +200,46 @@ void RowBatch::Deserialize(const kudu::Slice& input_tuple_offsets,
       tuple->ConvertOffsetsToPointers(*desc, tuple_data);
     }
   }
+  return Status::OK();
 }
 
-RowBatch::~RowBatch() {
-  tuple_data_pool_.FreeAll();
+/// XXX
+Status RowBatch::Create(const RowDescriptor* row_desc, const RowBatchHeaderPB& header,
+    const kudu::Slice& tuple_offsets, const kudu::Slice& tuple_data,
+    MemTracker* mem_tracker, BufferPool::ClientHandle* buffer_pool_client,
+    AtomicInt64* reservation_counter, std::unique_ptr<RowBatch>* row_batch_ptr) {
+  std::unique_ptr<RowBatch> row_batch(
+      new RowBatch(row_desc, header, tuple_offsets, tuple_data, mem_tracker));
+  const CompressionType& compression_type = header.compression_type();
+  DCHECK(compression_type == CompressionType::NONE ||
+      compression_type == CompressionType::LZ4)
+      << "Unexpected compression type: " << compression_type;
+  RETURN_IF_ERROR(row_batch->Deserialize(tuple_offsets, tuple_data,
+      header.uncompressed_size(), compression_type == CompressionType::LZ4,
+      buffer_pool_client, reservation_counter));
+  *row_batch_ptr = std::move(row_batch);
+  return Status::OK();
+}
+
+void RowBatch::FreeBuffers() {
   for (BufferInfo& buffer_info : buffers_) {
     ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
         buffer_info.client, &buffer_info.buffer);
   }
+  buffers_.clear();
+}
+
+RowBatch::~RowBatch() {
+  tuple_data_pool_.FreeAll();
+  FreeBuffers();
   DCHECK(tuple_ptrs_ != nullptr);
-  free(tuple_ptrs_);
-  mem_tracker_->Release(tuple_ptrs_size_);
+  if (tuple_ptrs_buffer_.get() != nullptr) {
+    ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
+        tuple_ptrs_buffer_->client, &(tuple_ptrs_buffer_->buffer));
+  } else {
+    free(tuple_ptrs_);
+    mem_tracker_->Release(tuple_ptrs_size_);
+  }
   tuple_ptrs_ = nullptr;
 }
 
@@ -366,11 +416,7 @@ void RowBatch::Reset() {
   capacity_ = tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
   // TODO: Change this to Clear() and investigate the repercussions.
   tuple_data_pool_.FreeAll();
-  for (BufferInfo& buffer_info : buffers_) {
-    ExecEnv::GetInstance()->buffer_pool()->FreeBuffer(
-        buffer_info.client, &buffer_info.buffer);
-  }
-  buffers_.clear();
+  FreeBuffers();
   attached_buffer_bytes_ = 0;
   flush_ = FlushMode::NO_FLUSH_RESOURCES;
   needs_deep_copy_ = false;
@@ -379,8 +425,8 @@ void RowBatch::Reset() {
 void RowBatch::TransferResourceOwnership(RowBatch* dest) {
   dest->tuple_data_pool_.AcquireData(&tuple_data_pool_, false);
   for (BufferInfo& buffer_info : buffers_) {
-    dest->AddBuffer(
-        buffer_info.client, std::move(buffer_info.buffer), FlushMode::NO_FLUSH_RESOURCES);
+    dest->AddBuffer(buffer_info.client, std::move(buffer_info.buffer),
+        FlushMode::NO_FLUSH_RESOURCES);
   }
   buffers_.clear();
   if (needs_deep_copy_) {
@@ -431,6 +477,7 @@ void RowBatch::AcquireState(RowBatch* src) {
   capacity_ = src->capacity_;
   // tuple_ptrs_ were allocated with malloc so can be swapped between batches.
   std::swap(tuple_ptrs_, src->tuple_ptrs_);
+  std::swap(tuple_ptrs_buffer_, src->tuple_ptrs_buffer_);
   src->TransferResourceOwnership(this);
 }
 

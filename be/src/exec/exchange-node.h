@@ -22,6 +22,8 @@
 #include <boost/scoped_ptr.hpp>
 #include "exec/exec-node.h"
 
+#include "runtime/bufferpool/buffer-pool.h"
+
 namespace impala {
 
 class DataStreamRecvrBase;
@@ -57,6 +59,11 @@ class ExchangeNode : public ExecNode {
   /// recorded in TPlanNode, and before calling Prepare()
   void set_num_senders(int num_senders) { num_senders_ = num_senders; }
 
+  /// XXX
+  BufferPool::ClientHandle* recvr_buffer_pool_client() {
+    return &recvr_buffer_pool_client_;
+  }
+
  protected:
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
@@ -88,6 +95,9 @@ class ExchangeNode : public ExecNode {
   /// is retrieved directly from the sender queue in the stream recvr, and rows from
   /// input_batch_ must be copied to the output batch in GetNext().
   int next_row_idx_;
+
+  /// XXX
+  BufferPool::ClientHandle recvr_buffer_pool_client_;
 
   /// time spent reconstructing received rows
   RuntimeProfile::Counter* convert_row_batch_timer_;

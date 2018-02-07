@@ -79,9 +79,16 @@ Status ExchangeNode::Prepare(RuntimeState* state) {
   }
 #endif
 
+  // XXX
+  RETURN_IF_ERROR(state->exec_env()->buffer_pool()->RegisterClient(
+      Substitute("Exchg Recvr (id=$0)", id_), nullptr,
+      state->exec_env()->buffer_reservation(), mem_tracker(),
+      numeric_limits<int64_t>::max(), runtime_profile(),
+      &recvr_buffer_pool_client_));
+
   // TODO: figure out appropriate buffer size
   DCHECK_GT(num_senders_, 0);
-  stream_recvr_ = ExecEnv::GetInstance()->stream_mgr()->CreateRecvr(state,
+  stream_recvr_ = ExecEnv::GetInstance()->stream_mgr()->CreateRecvr(this,
       &input_row_desc_, state->fragment_instance_id(), id_, num_senders_,
       FLAGS_exchg_node_buffer_size_bytes, runtime_profile(), is_merging_);
   if (is_merging_) {
@@ -128,6 +135,9 @@ void ExchangeNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   if (less_than_.get() != nullptr) less_than_->Close(state);
   if (stream_recvr_ != nullptr) stream_recvr_->Close();
+  if (recvr_buffer_pool_client_.is_registered()) {
+    state->exec_env()->buffer_pool()->DeregisterClient(&recvr_buffer_pool_client_);
+  }
   ScalarExpr::Close(ordering_exprs_);
   ExecNode::Close(state);
 }
