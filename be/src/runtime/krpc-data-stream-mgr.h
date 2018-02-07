@@ -52,6 +52,7 @@ namespace impala {
 class DescriptorTbl;
 class EndDataStreamRequestPB;
 class EndDataStreamResponsePB;
+class ExchangeNode;
 class KrpcDataStreamRecvr;
 class RuntimeState;
 class TransmitDataRequestPB;
@@ -239,7 +240,7 @@ class KrpcDataStreamMgr : public DataStreamMgrBase {
   /// single stream.
   /// Ownership of the receiver is shared between this DataStream mgr instance and the
   /// caller.
-  std::shared_ptr<DataStreamRecvrBase> CreateRecvr(RuntimeState* state,
+  std::shared_ptr<DataStreamRecvrBase> CreateRecvr(ExchangeNode* parent,
       const RowDescriptor* row_desc, const TUniqueId& fragment_instance_id,
       PlanNodeId dest_node_id, int num_senders, int64_t buffer_size,
       RuntimeProfile* profile, bool is_merging) override;

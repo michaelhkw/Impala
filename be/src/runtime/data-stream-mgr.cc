@@ -22,6 +22,7 @@
 #include <boost/thread/locks.hpp>
 #include <boost/thread/thread.hpp>
 
+#include "exec/exchange-node.h"
 #include "runtime/row-batch.h"
 #include "runtime/data-stream-recvr.h"
 #include "runtime/raw-value.inline.h"
@@ -75,7 +76,7 @@ inline uint32_t DataStreamMgr::GetHashValue(
   return value;
 }
 
-shared_ptr<DataStreamRecvrBase> DataStreamMgr::CreateRecvr(RuntimeState* state,
+shared_ptr<DataStreamRecvrBase> DataStreamMgr::CreateRecvr(ExchangeNode* parent,
     const RowDescriptor* row_desc, const TUniqueId& fragment_instance_id,
     PlanNodeId dest_node_id, int num_senders, int64_t buffer_size,
     RuntimeProfile* profile, bool is_merging) {
@@ -83,7 +84,7 @@ shared_ptr<DataStreamRecvrBase> DataStreamMgr::CreateRecvr(RuntimeState* state,
   VLOG_FILE << "creating receiver for fragment="
             << fragment_instance_id << ", node=" << dest_node_id;
   shared_ptr<DataStreamRecvr> recvr(
-      new DataStreamRecvr(this, state->instance_mem_tracker(), row_desc,
+      new DataStreamRecvr(this, parent->mem_tracker(), row_desc,
           fragment_instance_id, dest_node_id, num_senders, is_merging, buffer_size,
           profile));
   size_t hash_value = GetHashValue(fragment_instance_id, dest_node_id);

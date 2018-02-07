@@ -242,7 +242,9 @@ class BufferPool::Client {
   /// API to deduct from the client's reservation and update internal accounting. Cleans
   /// dirty pages if needed to satisfy the buffer pool's internal invariants. No page or
   /// client locks should be held by the caller.
-  Status PrepareToAllocateBuffer(int64_t len) WARN_UNUSED_RESULT;
+  /// TODO: better interface
+  Status PrepareToAllocateBuffer(
+      bool try_increase, int64_t len, bool* success = nullptr) WARN_UNUSED_RESULT;
 
   /// Implementation of ClientHandle::DecreaseReservationTo().
   Status DecreaseReservationTo(int64_t target_bytes) WARN_UNUSED_RESULT;

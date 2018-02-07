@@ -226,12 +226,23 @@ Status BufferPool::ExtractBuffer(
 
 Status BufferPool::AllocateBuffer(
     ClientHandle* client, int64_t len, BufferHandle* handle) {
-  RETURN_IF_ERROR(client->impl_->PrepareToAllocateBuffer(len));
+  RETURN_IF_ERROR(client->impl_->PrepareToAllocateBuffer(false, len));
   Status status = allocator_->Allocate(client, len, handle);
-  if (!status.ok()) {
-    // Allocation failed - update client's accounting to reflect the failure.
-    client->impl_->FreedBuffer(len);
-  }
+  // If the allocation failed, update client's accounting to reflect the failure.
+  if (!status.ok()) client->impl_->FreedBuffer(len);
+  return status;
+}
+
+Status BufferPool::TryAllocateBuffer(
+    ClientHandle* client, int64_t len, BufferHandle* handle) {
+  DCHECK(!handle->is_open());
+  bool success;
+  RETURN_IF_ERROR(client->impl_->PrepareToAllocateBuffer(true, len, &success));
+  if (!success) return Status::OK(); // Leave 'handle' closed to indicate failure.
+
+  Status status = allocator_->Allocate(client, len, handle);
+  // If the allocation failed, update client's accounting to reflect the failure.
+  if (!status.ok()) client->impl_->FreedBuffer(len);
   return status;
 }
 
@@ -546,13 +557,30 @@ Status BufferPool::Client::FinishMoveEvictedToPinned(Page* page) {
   return Status::OK();
 }
 
-Status BufferPool::Client::PrepareToAllocateBuffer(int64_t len) {
+Status BufferPool::Client::PrepareToAllocateBuffer(
+    bool try_increase, int64_t len, bool* success) {
+  // Ensure we have the reservation required first. Don't need to hold the client's
+  // 'lock_' because 'reservation_' operations are threadsafe.
+  if (try_increase) {
+    DCHECK(success != nullptr);
+    *success = false;
+    if (!reservation_.IncreaseReservationToFitAndAllocate(len)) return Status::OK();
+  } else {
+    DCHECK(success == nullptr);
+    reservation_.AllocateFrom(len);
+  }
+
   unique_lock<mutex> lock(lock_);
   // Clean enough pages to allow allocation to proceed without violating our eviction
-  // policy. This can fail, so only update the accounting once success is ensured.
-  RETURN_IF_ERROR(CleanPages(&lock, len));
-  reservation_.AllocateFrom(len);
+  // policy.
+  Status status = CleanPages(&lock, len);
+  if (!status.ok()) {
+    // Reverse the allocation.
+    reservation_.ReleaseTo(len);
+    return status;
+  }
   buffers_allocated_bytes_ += len;
+  if (success != nullptr) *success = true;
   DCHECK_CONSISTENCY();
   return Status::OK();
 }
