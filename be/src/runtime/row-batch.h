@@ -73,8 +73,27 @@ class OutboundRowBatch {
          header_.has_compression_type();
   }
 
+  /// XXX
+  void IncUse(int64_t count = 1) {
+    use_count_.Add(count);
+  }
+
+  void DecUse(int64_t count = -1) {
+    DCHECK_GE(use_count_.Load(), count);
+    use_count_.Add(count);
+  }
+
+  bool IsInUse() {
+    int64_t count = use_count_.Load();
+    DCHECK_GE(count, 0);
+    return count > 0;
+  }
+
  private:
   friend class RowBatch;
+
+  /// XXX
+  AtomicInt64 use_count_;
 
   /// The serialized header which contains the meta-data of the row batch such as the
   /// number of rows and compression scheme used etc.
