@@ -133,7 +133,7 @@ class KrpcDataStreamSender : public DataSink {
   /// batch while the other is still referenced by the in-flight RPC. Each entry contains
   /// a RowBatchHeaderPB and buffers for the serialized tuple offsets and data. Used only
   /// when the partitioning strategy is UNPARTITIONED.
-  static const int NUM_OUTBOUND_BATCHES = 2;
+  static const int NUM_OUTBOUND_BATCHES = 3;
   OutboundRowBatch outbound_batches_[NUM_OUTBOUND_BATCHES];
 
   /// If true, this sender has called FlushFinal() successfully.

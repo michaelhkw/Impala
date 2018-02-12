@@ -144,9 +144,6 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
 
   int64_t num_data_bytes_sent() const { return num_data_bytes_sent_; }
 
-  // The type for a RPC worker function.
-  typedef boost::function<Status()> DoRpcFn;
-
  private:
   // The parent data stream sender owning this channel. Not owned.
   KrpcDataStreamSender* parent_;
@@ -171,8 +168,6 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // batch while the other is still referenced by the in-flight RPC. Each entry contains
   // a RowBatchHeaderPB and the buffers for the serialized tuple offsets and data.
   //
-  // TODO: replace this with an actual queue. Schedule another RPC callback in the
-  // completion callback if the queue is not empty.
   // TODO: rethink whether to keep per-channel buffers vs having all buffers in the
   // datastream sender and sharing them across all channels. These buffers are not used in
   // "UNPARTITIONED" scheme.
@@ -208,8 +203,8 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // Status of the most recently completed RPC.
   Status rpc_status_;
 
-  // The pointer to the current serialized row batch being sent.
-  const OutboundRowBatch* rpc_in_flight_batch_ = nullptr;
+  // XXX
+  std::deque<const OutboundRowBatch*> pending_rpc_queue_;
 
   // True if there is an in-flight RPC.
   bool rpc_in_flight_ = false;
@@ -232,6 +227,9 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // fails or if the preceding RPC fails.
   Status SendCurrentBatch();
 
+  // The type for a RPC worker function.
+  typedef boost::function<Status()> DoRpcFn;
+
   // Called when an RPC failed. If it turns out that the RPC failed because the
   // remote server is too busy, this function will schedule RetryCb() to be called
   // after FLAGS_rpc_retry_interval_ms milliseconds, which in turn re-invokes the RPC.
@@ -243,13 +241,6 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // Kudu status 'controller_status'.
   void HandleFailedRPC(const DoRpcFn& rpc_fn, const kudu::Status& controller_status,
       const string& err_msg);
-
-  // Waits for the preceding RPC to complete. Expects to be called with 'lock_' held.
-  // May drop the lock while waiting for the RPC to complete. Return error status if
-  // the preceding RPC fails. Returns CANCELLED if the parent sender is cancelled or
-  // shut down. Returns OK otherwise. This should be only called from a fragment
-  // executor thread.
-  Status WaitForRpc(std::unique_lock<SpinLock>* lock);
 
   // A callback function called from KRPC reactor thread to retry an RPC which failed
   // previously due to remote server being too busy. This will re-arm the request
@@ -286,6 +277,24 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // Initializes the parameters for EndDataStream() RPC and invokes the async RPC call.
   Status DoEndDataStreamRpc();
 
+  // XXX
+  typedef boost::function<bool()> WaitCondFn;
+
+  // XXX
+  bool IsPendingQueueFull() {
+    return pending_rpc_queue_.size() >= (NUM_OUTBOUND_BATCHES - 1);
+  }
+
+  // XXX
+  bool IsRpcInFlight() { return rpc_in_flight_; }
+
+  // Waits for the preceding RPC to complete. Expects to be called with 'lock_' held.
+  // May drop the lock while waiting for the RPC to complete. Return error status if
+  // the preceding RPC fails. Returns CANCELLED if the parent sender is cancelled or
+  // shut down. Returns OK otherwise. This should be only called from a fragment
+  // executor thread.
+  Status WaitForRpc(std::unique_lock<SpinLock>* lock, WaitCondFn wait_cond_fn);
+
   // Marks the in-flight RPC as completed, updates 'rpc_status_' with the status of the
   // RPC (indicated in parameter 'status') and notifies any thread waiting for RPC
   // completion. Expects to be called with 'lock_' held. Called in the context of a
@@ -306,20 +315,31 @@ Status KrpcDataStreamSender::Channel::Init(RuntimeState* state) {
 }
 
 void KrpcDataStreamSender::Channel::MarkDone(const Status& status) {
-  rpc_status_ = status;
-  rpc_in_flight_ = false;
-  rpc_in_flight_batch_ = nullptr;
-  rpc_done_cv_.notify_one();
+  DCHECK(rpc_in_flight_);
+  rpc_status_.MergeStatus(status);
+  if (!pending_rpc_queue_.empty()) pending_rpc_queue_.pop_front();
+  if (status.ok() && !pending_rpc_queue_.empty()) {
+    // RetryCb() is scheduled to be called in a reactor context.
+    DoRpcFn rpc_fn =
+        boost::bind(&KrpcDataStreamSender::Channel::DoTransmitDataRpc, this);
+    ExecEnv::GetInstance()->rpc_mgr()->messenger()->ScheduleOnReactor(
+        boost::bind(&KrpcDataStreamSender::Channel::RetryCb, this, rpc_fn, _1),
+        MonoDelta::FromMilliseconds(0));
+  } else {
+    rpc_in_flight_ = false;
+    rpc_done_cv_.notify_one();
+  }
 }
 
-Status KrpcDataStreamSender::Channel::WaitForRpc(std::unique_lock<SpinLock>* lock) {
+Status KrpcDataStreamSender::Channel::WaitForRpc(std::unique_lock<SpinLock>* lock,
+    WaitCondFn wait_cond_fn) {
   DCHECK(lock != nullptr);
   DCHECK(lock->owns_lock());
 
   SCOPED_TIMER(parent_->state_->total_network_send_timer());
 
-  // Wait for in-flight RPCs to complete unless the parent sender is closed or cancelled.
-  while(rpc_in_flight_ && !ShouldTerminate()) {
+  // Wait for space in pending queue unless the parent sender is closed or cancelled.
+  while (wait_cond_fn() && !ShouldTerminate()) {
     rpc_done_cv_.wait_for(*lock, std::chrono::milliseconds(50));
   }
 
@@ -329,7 +349,7 @@ Status KrpcDataStreamSender::Channel::WaitForRpc(std::unique_lock<SpinLock>* loc
     return Status::CANCELLED;
   }
 
-  DCHECK(!rpc_in_flight_);
+  DCHECK(!wait_cond_fn());
   if (UNLIKELY(!rpc_status_.ok())) {
     LOG(ERROR) << "channel send to " << TNetworkAddressToString(address_) << " failed: "
                << rpc_status_.GetDetail();
@@ -384,8 +404,8 @@ void KrpcDataStreamSender::Channel::TransmitDataCompleteCb() {
     Status rpc_status = Status::OK();
     int32_t status_code = resp_.status().status_code();
     if (LIKELY(status_code == TErrorCode::OK)) {
-      DCHECK(rpc_in_flight_batch_ != nullptr);
-      num_data_bytes_sent_ += RowBatch::GetSerializedSize(*rpc_in_flight_batch_);
+      DCHECK_GT(pending_rpc_queue_.size(), 0);
+      num_data_bytes_sent_ += RowBatch::GetSerializedSize(*(pending_rpc_queue_.front()));
       VLOG_ROW << "incremented #data_bytes_sent=" << num_data_bytes_sent_;
     } else if (status_code == TErrorCode::DATASTREAM_RECVR_CLOSED) {
       remote_recvr_closed_ = true;
@@ -403,8 +423,11 @@ void KrpcDataStreamSender::Channel::TransmitDataCompleteCb() {
 }
 
 Status KrpcDataStreamSender::Channel::DoTransmitDataRpc() {
-  DCHECK(rpc_in_flight_batch_ != nullptr);
-  DCHECK(rpc_in_flight_batch_->IsInitialized());
+  DCHECK_GT(pending_rpc_queue_.size(), 0);
+  DCHECK(rpc_in_flight_);
+
+  const OutboundRowBatch* current_batch = pending_rpc_queue_.front();
+  DCHECK(current_batch->IsInitialized());
 
   // Initialize some constant fields in the request protobuf.
   TransmitDataRequestPB req;
@@ -416,19 +439,19 @@ Status KrpcDataStreamSender::Channel::DoTransmitDataRpc() {
 
   // Set the RowBatchHeader in the request.
   req.set_allocated_row_batch_header(
-      const_cast<RowBatchHeaderPB*>(rpc_in_flight_batch_->header()));
+      const_cast<RowBatchHeaderPB*>(current_batch->header()));
 
   rpc_controller_.Reset();
   int sidecar_idx;
   // Add 'tuple_offsets_' as sidecar.
   KUDU_RETURN_IF_ERROR(rpc_controller_.AddOutboundSidecar(RpcSidecar::FromSlice(
-      rpc_in_flight_batch_->TupleOffsetsAsSlice()), &sidecar_idx),
+      current_batch->TupleOffsetsAsSlice()), &sidecar_idx),
       "Unable to add tuple offsets to sidecar");
   req.set_tuple_offsets_sidecar_idx(sidecar_idx);
 
   // Add 'tuple_data_' as sidecar.
   KUDU_RETURN_IF_ERROR(rpc_controller_.AddOutboundSidecar(
-      RpcSidecar::FromSlice(rpc_in_flight_batch_->TupleDataAsSlice()), &sidecar_idx),
+      RpcSidecar::FromSlice(current_batch->TupleDataAsSlice()), &sidecar_idx),
       "Unable to add tuple data to sidecar");
   req.set_tuple_data_sidecar_idx(sidecar_idx);
 
@@ -447,21 +470,23 @@ Status KrpcDataStreamSender::Channel::TransmitData(
            << " dest_node=" << dest_node_id_
            << " #rows=" << outbound_batch->header()->num_rows();
   std::unique_lock<SpinLock> l(lock_);
-  RETURN_IF_ERROR(WaitForRpc(&l));
-  DCHECK(!rpc_in_flight_);
-  DCHECK(rpc_in_flight_batch_ == nullptr);
+  RETURN_IF_ERROR(WaitForRpc(&l,
+      boost::bind(&KrpcDataStreamSender::Channel::IsPendingQueueFull, this)));
   // If the remote receiver is closed already, there is no point in sending anything.
   // TODO: Needs better solution for IMPALA-3990 in the long run.
   if (UNLIKELY(remote_recvr_closed_)) return Status::OK();
-  rpc_in_flight_ = true;
-  rpc_in_flight_batch_ = outbound_batch;
-  RETURN_IF_ERROR(DoTransmitDataRpc());
+  pending_rpc_queue_.push_back(outbound_batch);
+  // If there is already RPC in flight, the completion callback will drain the queue.
+  if (!rpc_in_flight_) {
+    rpc_in_flight_ = true;
+    RETURN_IF_ERROR(DoTransmitDataRpc());
+  }
   return Status::OK();
 }
 
 Status KrpcDataStreamSender::Channel::SerializeAndSendBatch(RowBatch* batch) {
   OutboundRowBatch* outbound_batch = &outbound_batches_[next_batch_idx_];
-  DCHECK(outbound_batch != rpc_in_flight_batch_);
+  //DCHECK(outbound_batch != rpc_in_flight_batch_);
   RETURN_IF_ERROR(parent_->SerializeBatch(batch, outbound_batch));
   RETURN_IF_ERROR(TransmitData(outbound_batch));
   next_batch_idx_ = (next_batch_idx_ + 1) % NUM_OUTBOUND_BATCHES;
@@ -533,13 +558,15 @@ Status KrpcDataStreamSender::Channel::FlushAndSendEos(RuntimeState* state) {
   if (batch_->num_rows() > 0) RETURN_IF_ERROR(SendCurrentBatch());
   {
     std::unique_lock<SpinLock> l(lock_);
-    RETURN_IF_ERROR(WaitForRpc(&l));
+    RETURN_IF_ERROR(WaitForRpc(&l,
+        boost::bind(&KrpcDataStreamSender::Channel::IsRpcInFlight, this)));
     DCHECK(!rpc_in_flight_);
     if (UNLIKELY(remote_recvr_closed_)) return Status::OK();
     VLOG_RPC << "calling EndDataStream() to terminate channel.";
     rpc_in_flight_ = true;
     RETURN_IF_ERROR(DoEndDataStreamRpc());
-    RETURN_IF_ERROR(WaitForRpc(&l));
+    RETURN_IF_ERROR(WaitForRpc(&l,
+        boost::bind(&KrpcDataStreamSender::Channel::IsRpcInFlight, this)));
   }
   return Status::OK();
 }
@@ -574,6 +601,8 @@ KrpcDataStreamSender::KrpcDataStreamSender(int sender_id, const RowDescriptor* r
       || sink.output_partition.type == TPartitionType::HASH_PARTITIONED
       || sink.output_partition.type == TPartitionType::RANDOM
       || sink.output_partition.type == TPartitionType::KUDU);
+  // Allow a minimum of one batch in flight and one serialized batch to be enqueued.
+  DCHECK_GE(NUM_OUTBOUND_BATCHES, 2);
 
   for (int i = 0; i < destinations.size(); ++i) {
     channels_.push_back(
