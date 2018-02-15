@@ -352,6 +352,9 @@ error_codes = (
   ("PARQUET_BIT_PACKED_LEVELS", 115,
       "Can not read Parquet file $0 with deprecated BIT_PACKED encoding for rep or "
       "def levels. Support was removed in Impala 3.0 - see IMPALA-6077."),
+
+  ("ROW_BATCH_ALLOC_FAIL", 116,
+   "Failed to allocate a $0 bytes buffer for a row batch."),
 )
 
 import sys
