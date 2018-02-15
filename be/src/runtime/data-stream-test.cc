@@ -157,14 +157,13 @@ template <class T> class DataStreamTestBase : public T {
 };
 
 enum KrpcSwitch {
-  USE_THRIFT,
-  USE_KRPC
+  USE_KRPC,
+  USE_THRIFT
 };
 
 class DataStreamTest : public DataStreamTestBase<testing::TestWithParam<KrpcSwitch> > {
  protected:
   DataStreamTest() : next_val_(0) {
-
     // Stop tests that rely on mismatched sender / receiver pairs timing out from failing.
     FLAGS_datastream_sender_timeout_ms = 250;
   }
@@ -176,8 +175,15 @@ class DataStreamTest : public DataStreamTestBase<testing::TestWithParam<KrpcSwit
 
     exec_env_.reset(new ExecEnv());
     ABORT_IF_ERROR(exec_env_->InitForFeTests());
+    exec_env_->InitBufferPool(32 * 1024, TOTAL_DATA_SIZE * 2, 32 * 1024);
     runtime_state_.reset(new RuntimeState(TQueryCtx(), exec_env_.get()));
     mem_pool_.reset(new MemPool(&tracker_));
+
+    // Register a BufferPool client for allocating buffers for row batches.
+    ABORT_IF_ERROR(exec_env_->buffer_pool()->RegisterClient(
+        "DataStream Test Recvr", nullptr, exec_env_->buffer_reservation(), &tracker_,
+        numeric_limits<int64_t>::max(), runtime_state_->runtime_profile(),
+        &buffer_pool_client_));
 
     CreateRowDesc();
 
@@ -252,6 +258,7 @@ class DataStreamTest : public DataStreamTestBase<testing::TestWithParam<KrpcSwit
     } else {
       StopKrpcBackend();
     }
+    exec_env_->buffer_pool()->DeregisterClient(&buffer_pool_client_);
   }
 
   void Reset() {
@@ -274,6 +281,9 @@ class DataStreamTest : public DataStreamTestBase<testing::TestWithParam<KrpcSwit
   string stmt_;
   // The sorting expression for the single BIGINT column.
   vector<ScalarExpr*> ordering_exprs_;
+
+  // Client for allocating buffers for row batches.
+  BufferPool::ClientHandle buffer_pool_client_;
 
   // RowBatch generation
   scoped_ptr<RowBatch> batch_;
@@ -416,7 +426,7 @@ class DataStreamTest : public DataStreamTestBase<testing::TestWithParam<KrpcSwit
     receiver_info_.push_back(ReceiverInfo(stream_type, num_senders, receiver_num));
     ReceiverInfo& info = receiver_info_.back();
     info.stream_recvr = stream_mgr_->CreateRecvr(row_desc_, instance_id, DEST_NODE_ID,
-        num_senders, buffer_size, is_merging, profile, &tracker_);
+        num_senders, buffer_size, is_merging, profile, &tracker_, &buffer_pool_client_);
     if (!is_merging) {
       info.thread_handle = new thread(&DataStreamTest::ReadStream, this, &info);
     } else {
@@ -768,7 +778,7 @@ TEST_P(DataStreamTestThriftOnly, CloseRecvrWhileReferencesRemain) {
   TUniqueId instance_id;
   GetNextInstanceId(&instance_id);
   shared_ptr<DataStreamRecvrBase> stream_recvr = stream_mgr_->CreateRecvr(row_desc_,
-      instance_id, DEST_NODE_ID, 1, 1, false, profile, &tracker_);
+      instance_id, DEST_NODE_ID, 1, 1, false, profile, &tracker_, nullptr);
 
   // Perform tear down, but keep a reference to the receiver so that it is deleted last
   // (to confirm that the destructor does not access invalid state after tear-down).
@@ -832,7 +842,7 @@ TEST_P(DataStreamTestForImpala6346, TestNoDeadlock) {
   receiver_info_.push_back(ReceiverInfo(TPartitionType::UNPARTITIONED, 4, 1));
   ReceiverInfo& info = receiver_info_.back();
   info.stream_recvr = stream_mgr_->CreateRecvr(row_desc_, instance_id, DEST_NODE_ID,
-      4, 1024 * 1024, false, profile, &tracker_);
+      4, 1024 * 1024, false, profile, &tracker_, &buffer_pool_client_);
   info.thread_handle = new thread(
       &DataStreamTestForImpala6346_TestNoDeadlock_Test::ReadStream, this, &info);
 
