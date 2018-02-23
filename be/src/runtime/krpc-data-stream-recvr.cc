@@ -298,11 +298,10 @@ Status KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
   DCHECK(lock != nullptr);
   DCHECK(lock->owns_lock());
 
-  COUNTER_ADD(recvr_->num_accepted_batches_, 1);
-  COUNTER_ADD(recvr_->bytes_received_counter_, batch_size);
   // Reserve queue space before dropping the lock below.
   recvr_->num_buffered_bytes_.Add(batch_size);
   DCHECK_GE(num_pending_enqueue_, 0);
+  COUNTER_ADD(recvr_->num_received_batches_, 1);
   ++num_pending_enqueue_;
 
   // Deserialization may take some time due to compression and memory allocation.
@@ -327,6 +326,8 @@ Status KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
     return status;
   }
   VLOG_ROW << "added #rows=" << batch->num_rows() << " batch_size=" << batch_size;
+  COUNTER_ADD(recvr_->num_enqueued_batches_, 1);
+  COUNTER_ADD(recvr_->bytes_received_counter_, batch_size);
   batch_queue_.emplace_back(batch_size, move(batch));
   data_arrival_cv_.notify_one();
   return Status::OK();
@@ -334,10 +335,9 @@ Status KrpcDataStreamRecvr::SenderQueue::AddBatchWork(int64_t batch_size,
 
 void KrpcDataStreamRecvr::SenderQueue::RespondAndReleaseRpc(const Status& status,
     const unique_ptr<TransmitDataCtx>& ctx) {
-  int64_t transfer_size = ctx->rpc_context->GetTransferSize();
+  recvr_->mem_tracker()->Release(ctx->rpc_context->GetTransferSize());
   status.ToProto(ctx->response->mutable_status());
   ctx->rpc_context->RespondSuccess();
-  recvr_->mem_tracker()->Release(transfer_size);
 }
 
 void KrpcDataStreamRecvr::SenderQueue::AddBatch(const TransmitDataRequestPB* request,
@@ -408,7 +408,7 @@ void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
     kudu::Slice tuple_offsets;
     kudu::Slice tuple_data;
     int64_t batch_size;
-    Status status = UnpackRequest(ctx->request, ctx->rpc_context, &tuple_offsets,
+    status = UnpackRequest(ctx->request, ctx->rpc_context, &tuple_offsets,
         &tuple_data, &batch_size);
     // Reply with error status if the entry cannot be unpacked.
     if (UNLIKELY(!status.ok())) {
@@ -429,10 +429,14 @@ void KrpcDataStreamRecvr::SenderQueue::DequeueDeferredRpc() {
     deferred_rpcs_.pop();
     const RowBatchHeaderPB& header = ctx->request->row_batch_header();
     status = AddBatchWork(batch_size, header, tuple_offsets, tuple_data, &l);
+    DCHECK(!status.ok() || !batch_queue_.empty());
+
+    // Release the memory while holding the lock to avoid race with Close().
+    recvr_->mem_tracker()->Release(ctx->rpc_context->GetTransferSize());
   }
 
-  // Responds to the sender to ack the insertion of the row batches.
-  RespondAndReleaseRpc(status, ctx);
+  status.ToProto(ctx->response->mutable_status());
+  ctx->rpc_context->RespondSuccess();
 }
 
 void KrpcDataStreamRecvr::SenderQueue::TakeOverEarlySender(
@@ -568,8 +572,12 @@ KrpcDataStreamRecvr::KrpcDataStreamRecvr(KrpcDataStreamMgr* stream_mgr,
       ADD_COUNTER(sender_side_profile_, "NumEarlySenders", TUnit::UNIT);
   num_deferred_batches_ =
       ADD_COUNTER(sender_side_profile_, "NumBatchesDeferred", TUnit::UNIT);
-  num_accepted_batches_ =
-      ADD_COUNTER(sender_side_profile_, "NumBatchesAccepted", TUnit::UNIT);
+  num_received_batches_ =
+      ADD_COUNTER(sender_side_profile_, "NumBatchesReceived", TUnit::UNIT);
+  num_enqueued_batches_ =
+      ADD_COUNTER(sender_side_profile_, "NumBatchesEnqueued", TUnit::UNIT);
+  num_eos_received_ =
+      ADD_COUNTER(sender_side_profile_, "NumEosReceived", TUnit::UNIT);
 }
 
 Status KrpcDataStreamRecvr::GetNext(RowBatch* output_batch, bool* eos) {
@@ -600,6 +608,7 @@ void KrpcDataStreamRecvr::TakeOverEarlySender(unique_ptr<TransmitDataCtx> ctx) {
 void KrpcDataStreamRecvr::RemoveSender(int sender_id) {
   int use_sender_id = is_merging_ ? sender_id : 0;
   sender_queues_[use_sender_id]->DecrementSenders();
+  COUNTER_ADD(num_eos_received_, 1);
 }
 
 void KrpcDataStreamRecvr::CancelStream() {

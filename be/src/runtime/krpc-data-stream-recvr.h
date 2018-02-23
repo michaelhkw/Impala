@@ -211,11 +211,17 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   /// TODO: Turn this into a wall-clock timer.
   RuntimeProfile::Counter* first_batch_wait_total_timer_;
 
-  /// Total number of batches received and deferred as sender queue is full.
+  /// Total number of batches received and deferred as row batch queue is full.
   RuntimeProfile::Counter* num_deferred_batches_;
 
-  /// Total number of batches received and accepted into the sender queue.
-  RuntimeProfile::Counter* num_accepted_batches_;
+  /// Total number of batches received.
+  RuntimeProfile::Counter* num_received_batches_;
+
+  /// Total number of batches enqueued into the row batch queue.
+  RuntimeProfile::Counter* num_enqueued_batches_;
+
+  /// Total number of EOS received.
+  RuntimeProfile::Counter* num_eos_received_;
 
   /// Total wall-clock time spent waiting for data to arrive in the recv buffer.
   RuntimeProfile::Counter* data_arrival_timer_;
