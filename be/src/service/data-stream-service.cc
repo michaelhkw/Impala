@@ -79,4 +79,20 @@ void DataStreamService::TransmitData(const TransmitDataRequestPB* request,
   ExecEnv::GetInstance()->KrpcStreamMgr()->AddData(request, response, rpc_context);
 }
 
+template<typename ResponsePBType>
+void DataStreamService::RespondDeferredRpc(const Status& status,
+    ResponsePBType* response, kudu::rpc::RpcContext* ctx, MemTracker* mem_tracker) {
+  mem_tracker->Release(ctx->GetTransferSize());
+  status.ToProto(response->mutable_status());
+  ctx->RespondSuccess();
+}
+
+template void DataStreamService::RespondDeferredRpc(const Status& status,
+    TransmitDataResponsePB* response, kudu::rpc::RpcContext* ctx,
+    MemTracker* mem_tracker);
+
+template void DataStreamService::RespondDeferredRpc(const Status& status,
+    EndDataStreamResponsePB* response, kudu::rpc::RpcContext* ctx,
+    MemTracker* mem_tracker);
+
 }
