@@ -187,6 +187,8 @@ class OutboundTransfer : public boost::intrusive::list_base_hook<> {
   // In the case of call responses, kInvalidCallId
   int32_t call_id_;
 
+  bool started_;
+
   bool aborted_;
 
   DISALLOW_COPY_AND_ASSIGN(OutboundTransfer);
