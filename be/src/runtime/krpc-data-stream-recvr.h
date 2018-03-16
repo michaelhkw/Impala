@@ -167,6 +167,9 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
     return num_buffered_bytes_.Load() + batch_size > total_buffer_limit_;
   }
 
+  /// Return the current number of deferred row batches.
+  int64_t num_deferred_batches() const { return num_deferred_batches_.Load(); }
+
   /// KrpcDataStreamMgr instance used to create this recvr. Not owned.
   KrpcDataStreamMgr* mgr_;
 
@@ -190,8 +193,11 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   /// from the fragment execution thread.
   bool closed_;
 
-  /// total number of bytes held across all sender queues.
+  /// Current number of bytes held across all sender queues.
   AtomicInt32 num_buffered_bytes_;
+
+  /// Current number of outstanding deferred row batches across all sender queues.
+  AtomicInt64 num_deferred_batches_;
 
   /// Memtracker for payloads of deferred Rpcs in the sender queue(s). This must be
   /// accessed with a sender queue's lock held to avoid race with Close() of the queue.
@@ -217,60 +223,78 @@ class KrpcDataStreamRecvr : public DataStreamRecvrBase {
   ObjectPool pool_;
 
   /// Runtime profile of the owning exchange node. It's the parent of
-  /// 'recvr_side_profile_' and 'sender_side_profile_'. Not owned.
+  /// 'dequeue_profile_' and 'enqueue_profile_'. Not owned.
   RuntimeProfile* profile_;
 
   /// Maintain two child profiles - receiver side measurements (from the GetBatch() path),
   /// and sender side measurements (from AddBatch()). These two profiles own all counters
   /// below unless otherwise noted. These profiles are owned by the receiver and placed
-  /// in 'pool_'. 'recvr_side_profile_' and 'sender_side_profile_' must outlive 'profile_'
+  /// in 'pool_'. 'dequeue_profile_' and 'enqueue_profile_' must outlive 'profile_'
   /// to prevent accessing freed memory during top-down traversal of 'profile_'. The
   /// receiver is co-owned by the exchange node and the data stream manager so these two
   /// profiles should outlive the exchange node which owns 'profile_'.
-  RuntimeProfile* recvr_side_profile_;
-  RuntimeProfile* sender_side_profile_;
+  RuntimeProfile* dequeue_profile_;
+  RuntimeProfile* enqueue_profile_;
 
-  /// Number of bytes received but not necessarily enqueued.
+  /// Total wall-clock time spent deserializing row batches.
+  RuntimeProfile::Counter* deserialize_row_batch_timer_;
+
+  /// Total Number of senders which arrive before the receiver is ready.
+  RuntimeProfile::Counter* total_early_senders_;
+
+  /// Total number of serialized row batches received.
+  RuntimeProfile::Counter* total_received_batches_;
+
+  /// Total number of bytes of serialized row batches received.
   RuntimeProfile::Counter* bytes_received_counter_;
 
   /// Time series of number of bytes received, samples bytes_received_counter_.
   RuntimeProfile::TimeSeriesCounter* bytes_received_time_series_counter_;
 
-  /// Total wall-clock time spent deserializing row batches.
-  RuntimeProfile::Counter* deserialize_row_batch_timer_;
-
-  /// Number of senders which arrive before the receiver is ready.
-  RuntimeProfile::Counter* num_early_senders_;
-
-  /// Time spent waiting until the first batch arrives across all queues.
-  /// TODO: Turn this into a wall-clock timer.
-  RuntimeProfile::Counter* first_batch_wait_total_timer_;
-
-  /// Total number of batches which arrived at this receiver but not necessarily received
-  /// or enqueued. An arrived row batch will eventually be received if there is no error
-  /// unpacking the RPC payload and the receiving stream is not cancelled.
-  RuntimeProfile::Counter* num_arrived_batches_;
-
-  /// Total number of batches received but not necessarily enqueued.
-  RuntimeProfile::Counter* num_received_batches_;
-
-  /// Total number of batches received and enqueued into the row batch queue.
-  RuntimeProfile::Counter* num_enqueued_batches_;
+  /// Total number of batches enqueued into the row batch queue.
+  RuntimeProfile::Counter* total_enqueued_batches_;
 
   /// Total number of batches deferred because of early senders or full row batch queue.
-  RuntimeProfile::Counter* num_deferred_batches_;
+  RuntimeProfile::Counter* total_deferred_batches_;
+
+  /// Time series of number of deferred row batches, samples cur_deferred_batches_.
+  RuntimeProfile::TimeSeriesCounter* deferred_batches_time_series_counter_;
+
+  /// Total wall-clock time of row batches spent in deferred queue before being processed.
+  RuntimeProfile::Counter* deferred_queue_time_;
 
   /// Total number of EOS received.
-  RuntimeProfile::Counter* num_eos_received_;
+  RuntimeProfile::Counter* total_eos_received_;
 
-  /// Total wall-clock time spent waiting for data to arrive in the recv buffer.
-  RuntimeProfile::Counter* data_arrival_timer_;
+  /// Number of bytes of deserialized row batches dequeued.
+  RuntimeProfile::Counter* bytes_dequeued_counter_;
+
+  /// Time series of number of deferred row batches, samples bytes_dequeued_counter_.
+  RuntimeProfile::TimeSeriesCounter* bytes_dequeued_time_series_counter_;
+
+  /// Total wall-clock time spent in SenderQueue::GetBatch().
+  RuntimeProfile::Counter* queue_get_batch_time_;
+
+  /// Total wall-clock time spent waiting for data to be available in queues.
+  RuntimeProfile::Counter* data_wait_time_;
 
   /// Pointer to profile's inactive timer. Not owned.
+  /// Measure the same duration as 'data_arrival_time_' above. Used to subtract the
+  /// wait time from the total time spent in exchange node.
   RuntimeProfile::Counter* inactive_timer_;
 
-  /// Total time spent in SenderQueue::GetBatch().
-  RuntimeProfile::Counter* queue_get_batch_time_;
+  /// Wall-clock time spent waiting for the first batch arrival across all queues.
+  RuntimeProfile::Counter* first_batch_wait_total_time_;
+
+  /// Wall-clock Time spent waiting for data to arrive from senders. This is measuring
+  /// the duration between when a queue is completely empty with no deferred row batches
+  /// and when the next row batch arrives.
+  RuntimeProfile::Counter* producer_wait_time_;
+
+  /// Monotonic time in nanoseconds recorded when SenderQueue::GetBatch() starts waiting
+  /// for data from sender to show up. Set to 0 once data arrives or when the waiting
+  /// stops.
+  int64_t wait_time_start_ = 0;
 };
 
 } // namespace impala

@@ -625,7 +625,9 @@ Status KrpcDataStreamSender::Prepare(
   serialize_batch_timer_ = ADD_TIMER(profile(), "SerializeBatchTime");
   rpc_retry_counter_ = ADD_COUNTER(profile(), "RpcRetry", TUnit::UNIT);
   rpc_failure_counter_ = ADD_COUNTER(profile(), "RpcFailure", TUnit::UNIT);
-  bytes_sent_counter_ = ADD_COUNTER(profile(), "BytesSent", TUnit::BYTES);
+  bytes_sent_counter_ = ADD_COUNTER(profile(), "TotalBytesSent", TUnit::BYTES);
+  bytes_sent_time_series_counter_ =
+      ADD_TIME_SERIES_COUNTER(profile(), "BytesSent", bytes_sent_counter_);
   eos_sent_counter_ = ADD_COUNTER(profile(), "EosSent", TUnit::UNIT);
   uncompressed_bytes_counter_ =
       ADD_COUNTER(profile(), "UncompressedRowBatchSize", TUnit::BYTES);
@@ -756,6 +758,7 @@ void KrpcDataStreamSender::Close(RuntimeState* state) {
   ScalarExprEvaluator::Close(partition_expr_evals_, state);
   ScalarExpr::Close(partition_exprs_);
   DataSink::Close(state);
+  profile()->StopPeriodicCounters();
   closed_ = true;
 }
 

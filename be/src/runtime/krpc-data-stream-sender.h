@@ -163,6 +163,9 @@ class KrpcDataStreamSender : public DataSink {
   /// Total number of bytes sent.
   RuntimeProfile::Counter* bytes_sent_counter_ = nullptr;
 
+  /// Time series of number of bytes sent, samples bytes_sent_counter_.
+  RuntimeProfile::TimeSeriesCounter* bytes_sent_time_series_counter_;
+
   /// Total number of EOS sent.
   RuntimeProfile::Counter* eos_sent_counter_ = nullptr;
 

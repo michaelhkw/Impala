@@ -181,9 +181,13 @@ struct TransmitDataCtx {
   /// has been responded to. Not owned.
   kudu::rpc::RpcContext* rpc_context;
 
+  /// The monotonic time in nanoseconds of when this TransmitDataCtx is created.
+  const int64_t creation_time_;
+
   TransmitDataCtx(const TransmitDataRequestPB* request, TransmitDataResponsePB* response,
       kudu::rpc::RpcContext* rpc_context)
-    : request(request), response(response), rpc_context(rpc_context) { }
+    : request(request), response(response), rpc_context(rpc_context),
+      creation_time_(MonotonicNanos()) { }
 };
 
 /// Context for an EndDataStream() RPC. This structure is constructed when the RPC is
