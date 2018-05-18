@@ -429,11 +429,15 @@ void RowBatch::FreeBuffers() {
   buffers_.clear();
 }
 
-void RowBatch::Reset() {
+void RowBatch::Reset(bool free_mem_pool) {
   num_rows_ = 0;
   capacity_ = tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
   // TODO: Change this to Clear() and investigate the repercussions.
-  tuple_data_pool_.FreeAll();
+  if (free_mem_pool) {
+    tuple_data_pool_.FreeAll();
+  } else {
+    tuple_data_pool_.Clear();
+  }
   FreeBuffers();
   attached_buffer_bytes_ = 0;
   flush_ = FlushMode::NO_FLUSH_RESOURCES;

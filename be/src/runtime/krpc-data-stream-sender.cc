@@ -482,7 +482,7 @@ Status KrpcDataStreamSender::Channel::SerializeAndSendBatch(RowBatch* batch) {
 
 Status KrpcDataStreamSender::Channel::SendCurrentBatch() {
   RETURN_IF_ERROR(SerializeAndSendBatch(batch_.get()));
-  batch_->Reset();
+  batch_->Reset(false);
   return Status::OK();
 }
 
