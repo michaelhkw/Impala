@@ -137,6 +137,9 @@ class KrpcDataStreamSender : public DataSink {
   /// Adds the given row to 'channels_[channel_id]'.
   Status AddRowToChannel(const int channel_id, TupleRow* row);
 
+  /// XXX
+  Status CodegenEvalAndHashRow(LlvmCodeGen* codegen, int i, llvm::Function** fn);
+
   /// Codegen the HashRow() function and returns the codegen'd function in 'fn'.
   /// This involves unrolling the loop in HashRow(), codegens each of the partition
   /// expressions and replaces the column type argument to the hash function with

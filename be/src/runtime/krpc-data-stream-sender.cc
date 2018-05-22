@@ -660,6 +660,91 @@ Status KrpcDataStreamSender::Open(RuntimeState* state) {
   return ScalarExprEvaluator::Open(partition_expr_evals_, state);
 }
 
+Status KrpcDataStreamSender::CodegenEvalAndHashRow(LlvmCodeGen* codegen, int i,
+    llvm::Function** fn) {
+  llvm::LLVMContext& context = codegen->context();
+  LlvmBuilder builder(context);
+
+  LlvmCodeGen::FnPrototype prototype(
+      codegen, "KrpcDataStreamSenderEvalAndHashRow", codegen->i64_type());
+  prototype.AddArgument(
+      LlvmCodeGen::NamedVariable("this", codegen->GetNamedPtrType(LLVM_CLASS_NAME)));
+  prototype.AddArgument(
+      LlvmCodeGen::NamedVariable("row", codegen->GetStructPtrType<TupleRow>()));
+  prototype.AddArgument(
+      LlvmCodeGen::NamedVariable("hash_val", codegen->i64_type()));
+
+  llvm::Value* args[3];
+  llvm::Function* hash_row_fn = prototype.GeneratePrototype(&builder, args);
+  llvm::Value* this_arg = args[0];
+  llvm::Value* row_arg = args[1];
+  llvm::Value* hash_val_arg = args[2];
+
+  llvm::Function* compute_fn;
+  RETURN_IF_ERROR(partition_exprs_[i]->GetCodegendComputeFn(codegen, &compute_fn));
+
+  // Load the expression evaluator for the i-th partition expression
+  llvm::Function* get_expr_eval_fn =
+      codegen->GetFunction(IRFunction::KRPC_DSS_GET_PART_EXPR_EVAL, false);
+  DCHECK(get_expr_eval_fn != nullptr);
+  llvm::Value* expr_eval_arg =
+      builder.CreateCall(get_expr_eval_fn, {this_arg, codegen->GetI32Constant(i)});
+
+  // Compute the value against the i-th partition expression
+  llvm::Value* compute_fn_args[] = {expr_eval_arg, row_arg};
+  CodegenAnyVal partition_val = CodegenAnyVal::CreateCallWrapped(codegen, &builder,
+      partition_exprs_[i]->type(), compute_fn, compute_fn_args, "partition_val");
+
+  llvm::BasicBlock* is_null_block =
+      llvm::BasicBlock::Create(context, "is_null_block", hash_row_fn);
+  llvm::BasicBlock* not_null_block =
+      llvm::BasicBlock::Create(context, "not_null_block", hash_row_fn);
+  llvm::BasicBlock* hash_val_block =
+      llvm::BasicBlock::Create(context, "hash_val_block", hash_row_fn);
+
+  // Check if 'partition_val' is NULL
+  llvm::Value* val_is_null = partition_val.GetIsNull();
+  builder.CreateCondBr(val_is_null, is_null_block, not_null_block);
+
+  // Set the pointer to NULL in case 'partition_val' evaluates to NULL
+  builder.SetInsertPoint(is_null_block);
+  llvm::Value* null_ptr = codegen->null_ptr_value();
+  builder.CreateBr(hash_val_block);
+
+  // Saves 'partition_val' on the stack and passes a pointer to it to the hash function
+  builder.SetInsertPoint(not_null_block);
+  llvm::Value* native_ptr = partition_val.ToNativePtr();
+  native_ptr = builder.CreatePointerCast(native_ptr, codegen->ptr_type(), "native_ptr");
+  builder.CreateBr(hash_val_block);
+
+  // Picks the input value to hash function
+  builder.SetInsertPoint(hash_val_block);
+  llvm::PHINode* val_ptr_phi = builder.CreatePHI(codegen->ptr_type(), 2, "val_ptr_phi");
+  val_ptr_phi->addIncoming(native_ptr, not_null_block);
+  val_ptr_phi->addIncoming(null_ptr, is_null_block);
+
+  // Creates a global constant of the partition expression's ColumnType. It has to be a
+  // constant for constant propagation and dead code elimination in 'get_hash_value_fn'
+  llvm::Type* col_type = codegen->GetStructType<ColumnType>();
+  llvm::Constant* expr_type_arg = codegen->ConstantToGVPtr(
+      col_type, partition_exprs_[i]->type().ToIR(codegen), "expr_type_arg");
+
+  // Update 'hash_val' with the new 'partition-val'
+  llvm::Value* get_hash_value_args[] = {val_ptr_phi, expr_type_arg, hash_val_arg};
+  llvm::Function* get_hash_value_fn =
+      codegen->GetFunction(IRFunction::RAW_VALUE_GET_HASH_VALUE_FAST_HASH, false);
+  DCHECK(get_hash_value_fn != nullptr);
+  llvm::Value* hash_val =
+      builder.CreateCall(get_hash_value_fn, get_hash_value_args, "hash_val");
+  builder.CreateRet(hash_val);
+
+  *fn = codegen->FinalizeFunction(hash_row_fn);
+  if (*fn == nullptr) {
+    return Status("Codegen'd KrpcDataStreamSenderHashRow() fails verification. See log");
+  }
+  return Status::OK();
+}
+
 //
 // An example of generated code with int type.
 //
@@ -714,61 +799,9 @@ Status KrpcDataStreamSender::CodegenHashRow(LlvmCodeGen* codegen, llvm::Function
 
   // Unroll the loop and codegen each of the partition expressions
   for (int i = 0; i < partition_exprs_.size(); ++i) {
-    llvm::Function* compute_fn;
-    RETURN_IF_ERROR(partition_exprs_[i]->GetCodegendComputeFn(codegen, &compute_fn));
-
-    // Load the expression evaluator for the i-th partition expression
-    llvm::Function* get_expr_eval_fn =
-        codegen->GetFunction(IRFunction::KRPC_DSS_GET_PART_EXPR_EVAL, false);
-    DCHECK(get_expr_eval_fn != nullptr);
-    llvm::Value* expr_eval_arg =
-        builder.CreateCall(get_expr_eval_fn, {this_arg, codegen->GetI32Constant(i)});
-
-    // Compute the value against the i-th partition expression
-    llvm::Value* compute_fn_args[] = {expr_eval_arg, row_arg};
-    CodegenAnyVal partition_val = CodegenAnyVal::CreateCallWrapped(codegen, &builder,
-        partition_exprs_[i]->type(), compute_fn, compute_fn_args, "partition_val");
-
-    llvm::BasicBlock* is_null_block =
-        llvm::BasicBlock::Create(context, "is_null_block", hash_row_fn);
-    llvm::BasicBlock* not_null_block =
-        llvm::BasicBlock::Create(context, "not_null_block", hash_row_fn);
-    llvm::BasicBlock* hash_val_block =
-        llvm::BasicBlock::Create(context, "hash_val_block", hash_row_fn);
-
-    // Check if 'partition_val' is NULL
-    llvm::Value* val_is_null = partition_val.GetIsNull();
-    builder.CreateCondBr(val_is_null, is_null_block, not_null_block);
-
-    // Set the pointer to NULL in case 'partition_val' evaluates to NULL
-    builder.SetInsertPoint(is_null_block);
-    llvm::Value* null_ptr = codegen->null_ptr_value();
-    builder.CreateBr(hash_val_block);
-
-    // Saves 'partition_val' on the stack and passes a pointer to it to the hash function
-    builder.SetInsertPoint(not_null_block);
-    llvm::Value* native_ptr = partition_val.ToNativePtr();
-    native_ptr = builder.CreatePointerCast(native_ptr, codegen->ptr_type(), "native_ptr");
-    builder.CreateBr(hash_val_block);
-
-    // Picks the input value to hash function
-    builder.SetInsertPoint(hash_val_block);
-    llvm::PHINode* val_ptr_phi = builder.CreatePHI(codegen->ptr_type(), 2, "val_ptr_phi");
-    val_ptr_phi->addIncoming(native_ptr, not_null_block);
-    val_ptr_phi->addIncoming(null_ptr, is_null_block);
-
-    // Creates a global constant of the partition expression's ColumnType. It has to be a
-    // constant for constant propagation and dead code elimination in 'get_hash_value_fn'
-    llvm::Type* col_type = codegen->GetStructType<ColumnType>();
-    llvm::Constant* expr_type_arg = codegen->ConstantToGVPtr(
-        col_type, partition_exprs_[i]->type().ToIR(codegen), "expr_type_arg");
-
-    // Update 'hash_val' with the new 'partition-val'
-    llvm::Value* get_hash_value_args[] = {val_ptr_phi, expr_type_arg, hash_val};
-    llvm::Function* get_hash_value_fn =
-        codegen->GetFunction(IRFunction::RAW_VALUE_GET_HASH_VALUE_FAST_HASH, false);
-    DCHECK(get_hash_value_fn != nullptr);
-    hash_val = builder.CreateCall(get_hash_value_fn, get_hash_value_args, "hash_val");
+    llvm::Function* eval_and_hash_fn;
+    RETURN_IF_ERROR(CodegenEvalAndHashRow(codegen, i, &eval_and_hash_fn));
+    hash_val = builder.CreateCall(eval_and_hash_fn, {this_arg, row_arg, hash_val});
   }
 
   builder.CreateRet(hash_val);
