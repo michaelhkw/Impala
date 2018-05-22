@@ -933,6 +933,14 @@ void RuntimeProfile::ToThrift(vector<TRuntimeProfileNode>* nodes) const {
   }
 }
 
+Status RuntimeProfile::SerializeToFaststring(kudu::faststring* str) {
+  TRuntimeProfileTree thrift_tree;
+  ToThrift(&thrift_tree);
+  ThriftSerializer serializer(true);
+  RETURN_IF_ERROR(serializer.Serialize(&thrift_tree, str));
+  return Status::OK();
+}
+
 int64_t RuntimeProfile::UnitsPerSecond(
     const RuntimeProfile::Counter* total_counter,
     const RuntimeProfile::Counter* timer) {

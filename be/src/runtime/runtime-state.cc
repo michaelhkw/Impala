@@ -201,9 +201,12 @@ bool RuntimeState::LogError(const ErrorMsg& message, int vlog_level) {
   return false;
 }
 
-void RuntimeState::GetUnreportedErrors(ErrorLogMap* new_errors) {
+void RuntimeState::GetUnreportedErrors(ReportExecStatusRequestPB* exec_status) {
   lock_guard<SpinLock> l(error_log_lock_);
-  *new_errors = error_log_;
+  auto new_errors = exec_status->mutable_error_log();
+  for (auto iter = error_log_.begin(); iter != error_log_.end(); ++iter) {
+    (*new_errors)[iter->first] = iter->second;
+  }
   // Reset all messages, but keep all already reported keys so that we do not report the
   // same errors multiple times.
   ClearErrorMap(error_log_);

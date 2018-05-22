@@ -28,10 +28,17 @@
 #include "common/status.h"
 #include "gen-cpp/Frontend_types.h"
 #include "gen-cpp/Types_types.h"
+#include "kudu/util/slice.h"
 #include "runtime/dml-exec-state.h"
 #include "util/progress-updater.h"
 #include "util/runtime-profile-counters.h"
 #include "util/spinlock.h"
+
+namespace kudu {
+namespace rpc {
+class RpcContext;
+} // namespace rpc
+} // namespace kudu
 
 namespace impala {
 
@@ -39,7 +46,6 @@ class CountingBarrier;
 class ObjectPool;
 class RuntimeState;
 class TUpdateCatalogRequest;
-class TReportExecStatusParams;
 class TPlanExecRequest;
 class TRuntimeProfileTree;
 class RuntimeProfile;
@@ -49,7 +55,7 @@ class MemTracker;
 class PlanRootSink;
 class FragmentInstanceState;
 class QueryState;
-
+class ReportExecStatusRequestPB;
 
 /// Query coordinator: handles execution of fragment instances on remote nodes, given a
 /// TQueryExecRequest. As part of that, it handles all interactions with the executing
@@ -125,11 +131,12 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// query is still executing. Idempotent.
   void Cancel();
 
-  /// Called by the report status RPC handler to update execution status of a
-  /// particular backend as well as dml_exec_state_ and the profile. This may block if
-  /// exec RPCs are pending.
-  Status UpdateBackendExecStatus(const TReportExecStatusParams& params)
-      WARN_UNUSED_RESULT;
+  /// Called by the report status RPC handler to update execution status of a particular
+  /// backend as well as dml_exec_state_ and the profile. This may block if exec RPCs are
+  /// pending. 'request' contains details of the status update. 'thrift_profile' is the
+  /// Thrift runtime profile from the backend.
+  Status UpdateBackendExecStatus(const ReportExecStatusRequestPB& request,
+      const TRuntimeProfileTree& thrift_profile) WARN_UNUSED_RESULT;
 
   /// Get cumulative profile aggregated over all fragments of the query.
   /// This is a snapshot of the current state of execution and will change in

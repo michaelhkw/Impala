@@ -41,6 +41,7 @@ namespace impala {
 class AdmissionController;
 class BufferPool;
 class CallableThreadPool;
+class ControlService;
 class DataStreamMgrBase;
 class DataStreamMgr;
 class DataStreamService;
@@ -203,6 +204,7 @@ class ExecEnv {
   boost::scoped_ptr<CallableThreadPool> async_rpc_pool_;
   boost::scoped_ptr<QueryExecMgr> query_exec_mgr_;
   boost::scoped_ptr<RpcMgr> rpc_mgr_;
+  boost::scoped_ptr<ControlService> control_svc_;
   boost::scoped_ptr<DataStreamService> data_svc_;
 
   /// Query-wide buffer pool and the root reservation tracker for the pool. The

@@ -44,6 +44,14 @@ KRPC_GENERATE(DATA_STREAM_SVC_PROTO_SRCS DATA_STREAM_SVC_PROTO_HDRS
 add_custom_target(data_stream_svc_proto DEPENDS ${DATA_STREAM_SVC_PROTO_TGTS})
 set(DATA_STREAM_SVC_PROTO_SRCS ${DATA_STREAM_SVC_PROTO_SRCS} PARENT_SCOPE)
 
+KRPC_GENERATE(CONTROL_SVC_PROTO_SRCS CONTROL_SVC_PROTO_HDRS
+  CONTROL_SVC_PROTO_TGTS
+  SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}
+  BINARY_ROOT ${PROTOBUF_OUTPUT_DIR}
+  PROTO_FILES control_service.proto)
+add_custom_target(control_svc_proto DEPENDS ${CONTROL_SVC_PROTO_TGTS})
+set(CONTROL_SVC_PROTO_SRCS ${CONTROL_SVC_PROTO_SRCS} PARENT_SCOPE)
+
 KRPC_GENERATE(RPC_TEST_PROTO_SRCS RPC_TEST_PROTO_HDRS
   RPC_TEST_PROTO_TGTS
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}
@@ -52,4 +60,4 @@ KRPC_GENERATE(RPC_TEST_PROTO_SRCS RPC_TEST_PROTO_HDRS
 add_custom_target(rpc_test_proto_tgt DEPENDS ${RPC_TEST_PROTO_TGTS})
 set(RPC_TEST_PROTO_SRCS ${RPC_TEST_PROTO_SRCS} PARENT_SCOPE)
 
-add_custom_target(proto-deps DEPENDS token_proto rpc_header_proto common_proto row_batch_proto data_stream_svc_proto)
+add_custom_target(proto-deps DEPENDS token_proto rpc_header_proto common_proto row_batch_proto data_stream_svc_proto control_svc_proto)

@@ -96,6 +96,8 @@ class DataSink {
   }
   bool is_closed() const { return closed_; }
 
+  static const string ROOT_PARTITION_KEY;
+
  protected:
   /// Set to true after Close() has been called. Subclasses should check and set this in
   /// Close().

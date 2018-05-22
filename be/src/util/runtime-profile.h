@@ -25,6 +25,7 @@
 
 #include "common/atomic.h"
 #include "common/status.h"
+#include "kudu/util/faststring.h"
 #include "util/spinlock.h"
 
 #include "gen-cpp/RuntimeProfile_types.h"
@@ -278,6 +279,9 @@ class RuntimeProfile { // NOLINT: This struct is not packed, but there are not s
   /// should not be in the hot path.
   Status SerializeToArchiveString(std::string* out) const WARN_UNUSED_RESULT;
   Status SerializeToArchiveString(std::stringstream* out) const WARN_UNUSED_RESULT;
+
+  /// Serialize the runtime profile to thrift and stores it into the buffer in 'str'.
+  Status SerializeToFaststring(kudu::faststring* str);
 
   /// Divides all counters by n
   void Divide(int n);

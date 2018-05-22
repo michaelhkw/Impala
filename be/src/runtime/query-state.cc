@@ -21,7 +21,13 @@
 #include <boost/thread/locks.hpp>
 
 #include "common/thread-debug-info.h"
+#include "exec/kudu-util.h"
 #include "exprs/expr.h"
+#include "kudu/rpc/rpc_controller.h"
+#include "kudu/rpc/rpc_sidecar.h"
+#include "kudu/util/status.h"
+#include "rpc/rpc-mgr.h"
+#include "rpc/rpc-mgr.inline.h"
 #include "runtime/backend-client.h"
 #include "runtime/bufferpool/buffer-pool.h"
 #include "runtime/bufferpool/reservation-tracker.h"
@@ -35,6 +41,12 @@
 #include "util/debug-util.h"
 #include "util/impalad-metrics.h"
 #include "util/thread.h"
+
+#include "gen-cpp/control_service.pb.h"
+#include "gen-cpp/control_service.proxy.h"
+
+using kudu::rpc::RpcController;
+using kudu::rpc::RpcSidecar;
 
 #include "common/names.h"
 
@@ -216,56 +228,70 @@ void QueryState::ReportExecStatusAux(bool done, const Status& status,
   // This will send a report even if we are cancelled.  If the query completed correctly
   // but fragments still need to be cancelled (e.g. limit reached), the coordinator will
   // be waiting for a final report and profile.
-  TReportExecStatusParams params;
-  params.protocol_version = ImpalaInternalServiceVersion::V1;
-  params.__set_query_id(query_ctx().query_id);
-  DCHECK(rpc_params().__isset.coord_state_idx);
-  params.__set_coord_state_idx(rpc_params().coord_state_idx);
-  status.SetTStatus(&params);
+  ReportExecStatusRequestPB req;
+  req.set_protocol_version(ImpalaInternalServiceVersionPB::V1);
+  UniqueIdPB* query_id_pb = req.mutable_query_id();
+  query_id_pb->set_lo(query_id().lo);
+  query_id_pb->set_hi(query_id().hi);
 
+  DCHECK(rpc_params().__isset.coord_state_idx);
+  req.set_coord_state_idx(rpc_params().coord_state_idx);
+  status.ToProto(req.mutable_status());
+
+  RpcController rpc_controller;
   if (fis != nullptr) {
     // create status for 'fis'
-    params.instance_exec_status.emplace_back();
-    params.__isset.instance_exec_status = true;
-    TFragmentInstanceExecStatus& instance_status = params.instance_exec_status.back();
-    instance_status.__set_fragment_instance_id(fis->instance_id());
-    status.SetTStatus(&instance_status);
-    instance_status.__set_done(done);
-    instance_status.__set_current_state(fis->current_state());
+    FragmentInstanceExecStatusPB* instance_status = req.add_instance_exec_status();
+    UniqueIdPB* finstance_id_pb = instance_status->mutable_fragment_instance_id();
+    finstance_id_pb->set_lo(fis->instance_id().lo);
+    finstance_id_pb->set_hi(fis->instance_id().hi);
+    status.ToProto(instance_status->mutable_status());
+    instance_status->set_done(done);
+    instance_status->set_current_state(fis->current_state());
 
+    // Serialize the profile in Thrift and then send it as a sidecar. We keep the
+    // runtime profile as Thrift object as Impala client still communicates with
+    // Impala server with Thrift RPC.
+    //
+    // Note the ownership of the Thrift profile buffer is transferred to RPC layer
+    // and it is freed after the RPC payload is sent. If serialization of the profile
+    // to RPC sidecar fails, we will proceed without the profile so that the coordinator
+    // can still get the status instead of hitting IMPALA-2990.
     DCHECK(fis->profile() != nullptr);
-    fis->profile()->ToThrift(&instance_status.profile);
-    instance_status.__isset.profile = true;
+    unique_ptr<kudu::faststring> thrift_profile_buffer = make_unique<kudu::faststring>();
+    Status serialize_status =
+        fis->profile()->SerializeToFaststring(thrift_profile_buffer.get());
+    if (serialize_status.ok()) {
+      int sidecar_idx;
+      unique_ptr<RpcSidecar> sidecar =
+          RpcSidecar::FromFaststring(move(thrift_profile_buffer));
+      if (rpc_controller.AddOutboundSidecar(move(sidecar), &sidecar_idx).ok()) {
+        instance_status->set_thrift_profile_sidecar_idx(sidecar_idx);
+      }
+    } else {
+      const string err = Substitute("Failed to serialize $0profile for query ID $1: $2",
+          done ? "final" : "", PrintId(query_id()), serialize_status.GetDetail());
+      LOG(ERROR) << err;
+    }
 
     // Only send updates to insert status if fragment is finished, the coordinator waits
     // until query execution is done to use them anyhow.
     RuntimeState* state = fis->runtime_state();
-    if (done && state->dml_exec_state()->ToThrift(&params.insert_exec_status)) {
-      params.__isset.insert_exec_status = true;
-    }
+    if (done) state->dml_exec_state()->ToProto(req.mutable_insert_exec_status());
+
     // Send new errors to coordinator
-    state->GetUnreportedErrors(&params.error_log);
-    params.__isset.error_log = (params.error_log.size() > 0);
+    state->GetUnreportedErrors(&req);
   }
 
-  Status rpc_status;
-  TReportExecStatusResult res;
-  DCHECK_EQ(res.status.status_code, TErrorCode::OK);
-  // Try to send the RPC 3 times before failing. Sleep for 100ms between retries.
-  // It's safe to retry the RPC as the coordinator handles duplicate RPC messages.
-  Status client_status;
-  for (int i = 0; i < 3; ++i) {
-    ImpalaBackendConnection client(ExecEnv::GetInstance()->impalad_client_cache(),
-        query_ctx().coord_address, &client_status);
-    if (client_status.ok()) {
-      rpc_status = client.DoRpc(&ImpalaBackendClient::ReportExecStatus, params, &res);
-      if (rpc_status.ok()) break;
-    }
-    if (i < 2) SleepForMs(FLAGS_report_status_retry_interval_ms);
-  }
-  Status result_status(res.status);
-  if ((!client_status.ok() || !rpc_status.ok() || !result_status.ok()) &&
-      instances_started) {
+  RpcMgr* rpc_mgr = ExecEnv::GetInstance()->rpc_mgr();
+  unique_ptr<ControlServiceProxy> proxy;
+  rpc_mgr->GetProxy(query_ctx().coord_krpc_address, &proxy);
+
+  ReportExecStatusResponsePB resp;
+  kudu::Status rpc_status = proxy->ReportExecStatus(req, &resp, &rpc_controller);
+  Status result_status(resp.status());
+
+  if ((!rpc_status.ok() || !result_status.ok()) && instances_started) {
     // TODO: should we try to keep rpc_status for the final report? (but the final
     // report, following this Cancel(), may not succeed anyway.)
     // TODO: not keeping an error status here means that all instances might
@@ -273,13 +299,9 @@ void QueryState::ReportExecStatusAux(bool done, const Status& status,
     // TODO: Fix IMPALA-2990. Cancelling fragment instances without sending the
     // ReporExecStatus RPC may cause query to hang as the coordinator may not be aware
     // of the cancellation. Remove the log statements once IMPALA-2990 is fixed.
-    if (!client_status.ok()) {
-      LOG(ERROR) << "Cancelling fragment instances due to failure to obtain a connection "
-                 << "to the coordinator. (" << client_status.GetDetail()
-                 << "). Query " << PrintId(query_id()) << " may hang. See IMPALA-2990.";
-    } else if (!rpc_status.ok()) {
+    if (!rpc_status.ok() && !RpcMgr::IsServerTooBusy(rpc_controller)) {
       LOG(ERROR) << "Cancelling fragment instances due to failure to reach the "
-                 << "coordinator. (" << rpc_status.GetDetail()
+                 << "coordinator. (" << FromKuduStatus(rpc_status, "").GetDetail()
                  << "). Query " << PrintId(query_id()) << " may hang. See IMPALA-2990.";
     } else if (!result_status.ok()) {
       // If the ReportExecStatus RPC succeeded in reaching the coordinator and we get

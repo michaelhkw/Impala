@@ -29,12 +29,20 @@
 #include "util/auth-util.h"
 #include "util/condition-variable.h"
 #include "util/runtime-profile.h"
+#include "gen-cpp/control_service.pb.h"
 #include "gen-cpp/Frontend_types.h"
 #include "gen-cpp/ImpalaHiveServer2Service.h"
+#include "gen-cpp/RuntimeProfile_types.h"
 
 #include <boost/thread.hpp>
 #include <boost/unordered_set.hpp>
 #include <vector>
+
+namespace kudu {
+namespace rpc {
+class RpcContext;
+} // namespace rpc
+} // namespace kudu
 
 namespace impala {
 
@@ -153,7 +161,8 @@ class ClientRequestState {
   /// coordinator even before it becomes accessible through GetCoordinator(). These
   /// methods should be used instead of calling them directly using the coordinator
   /// object.
-  Status UpdateBackendExecStatus(const TReportExecStatusParams& params);
+  Status UpdateBackendExecStatus(const ReportExecStatusRequestPB& request,
+      const TRuntimeProfileTree& thrift_profile) WARN_UNUSED_RESULT;
   void UpdateFilter(const TUpdateFilterParams& params);
 
   ImpalaServer::SessionState* session() const { return session_.get(); }

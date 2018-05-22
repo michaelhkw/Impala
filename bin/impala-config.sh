@@ -68,7 +68,7 @@ fi
 # moving to a different build of the toolchain, e.g. when a version is bumped or a
 # compile option is changed. The build id can be found in the output of the toolchain
 # build jobs, it is constructed from the build number and toolchain git hash prefix.
-export IMPALA_TOOLCHAIN_BUILD_ID=107-764a0ddc79
+export IMPALA_TOOLCHAIN_BUILD_ID=146-f2d5380be6
 # Versions of toolchain dependencies.
 # -----------------------------------
 export IMPALA_AVRO_VERSION=1.7.4-p4
@@ -103,14 +103,14 @@ export IMPALA_GTEST_VERSION=1.6.0
 unset IMPALA_GTEST_URL
 export IMPALA_LIBEV_VERSION=4.20
 unset IMPALA_LIBEV_URL
-export IMPALA_LLVM_VERSION=5.0.1
+export IMPALA_LLVM_VERSION=5.0.1-p1
 unset IMPALA_LLVM_URL
-export IMPALA_LLVM_ASAN_VERSION=5.0.1
+export IMPALA_LLVM_ASAN_VERSION=5.0.1-p1
 unset IMPALA_LLVM_ASAN_URL
 
 # Debug builds should use the release+asserts build to get additional coverage.
 # Don't use the LLVM debug build because the binaries are too large to distribute.
-export IMPALA_LLVM_DEBUG_VERSION=5.0.1-asserts
+export IMPALA_LLVM_DEBUG_VERSION=5.0.1-asserts-p1
 unset IMPALA_LLVM_DEBUG_URL
 export IMPALA_LZ4_VERSION=1.7.5
 unset IMPALA_LZ4_URL
@@ -120,7 +120,7 @@ export IMPALA_OPENSSL_VERSION=1.0.2l
 unset IMPALA_OPENSSL_URL
 export IMPALA_ORC_VERSION=1.4.3-p2
 unset IMPALA_ORC_URL
-export IMPALA_PROTOBUF_VERSION=2.6.1
+export IMPALA_PROTOBUF_VERSION=3.5.1
 unset IMPALA_PROTOBUF_URL
 export IMPALA_POSTGRES_JDBC_DRIVER_VERSION=9.0-801
 unset IMPALA_POSTGRES_JDBC_DRIVER_URL
@@ -610,6 +610,10 @@ export HBASE_CONF_DIR="$IMPALA_FE_DIR/src/test/resources"
 
 # Set $THRIFT_HOME to the Thrift directory in toolchain.
 export THRIFT_HOME="${IMPALA_TOOLCHAIN}/thrift-${IMPALA_THRIFT_VERSION}"
+
+# Add Protobuf directory in toolchain to $PATH.
+export PROTOBUF_HOME="${IMPALA_TOOLCHAIN}/protobuf-${IMPALA_PROTOBUF_VERSION}"
+export PATH="${PROTOBUF_HOME}/bin:$PATH"
 
 # ASAN needs a matching version of llvm-symbolizer to symbolize stack traces.
 export ASAN_SYMBOLIZER_PATH="${IMPALA_TOOLCHAIN}/llvm-${IMPALA_LLVM_ASAN_VERSION}/bin/llvm-symbolizer"

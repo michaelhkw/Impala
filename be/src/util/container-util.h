@@ -24,6 +24,10 @@
 #include <boost/unordered_map.hpp>
 #include <boost/functional/hash.hpp>
 
+#include <google/protobuf/map.h>
+#include <google/protobuf/map_entry.h>
+#include <google/protobuf/map_field_inl.h>
+
 #include "util/hash-util.h"
 #include "gen-cpp/Types_types.h"
 
@@ -138,6 +142,22 @@ void MergeMapValues(const std::map<K, V>& src, std::map<K, V>* dst) {
     }
   }
 }
+
+template<typename K, typename V>
+void MergeMapValues(const google::protobuf::Map<K, V>& src,
+    google::protobuf::Map<K, V>* dst) {
+  for (typename google::protobuf::Map<K, V>::const_iterator src_it = src.begin();
+      src_it != src.end(); ++src_it) {
+    typename google::protobuf::Map<K, V>::iterator dst_it = dst->find(src_it->first);
+    if (dst_it == dst->end()) {
+      (*dst)[src_it->first] = src_it->second;
+    } else {
+      dst_it->second += src_it->second;
+    }
+  }
+}
+
+
 
 }
 

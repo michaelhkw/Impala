@@ -45,14 +45,14 @@ using namespace impala;
 
 Status InProcessImpalaServer::StartWithEphemeralPorts(const string& statestore_host,
     int statestore_port, InProcessImpalaServer** server) {
-  // Thes flags are read directly in several places to find the address of the local
+  // These flags are read directly in several places to find the address of the local
   // backend interface.
   FLAGS_be_port = 0;
-  FLAGS_krpc_port = 0;
+  FLAGS_krpc_port = FindUnusedEphemeralPort();;
 
   // Use wildcard addresses of 0 so that the servers will pick their own port.
-  *server = new InProcessImpalaServer(FLAGS_hostname, 0, 0, 0, 0, statestore_host,
-      statestore_port);
+  *server = new InProcessImpalaServer(FLAGS_hostname, 0, FLAGS_krpc_port, 0, 0,
+      statestore_host, statestore_port);
   // Start the daemon and check if it works, if not delete the current server object and
   // pick a new set of ports
   return (*server)->StartWithClientServers(0, 0);

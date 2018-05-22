@@ -48,6 +48,7 @@
 #include "scheduling/admission-controller.h"
 #include "scheduling/request-pool-service.h"
 #include "scheduling/scheduler.h"
+#include "service/control-service.h"
 #include "service/data-stream-service.h"
 #include "service/frontend.h"
 #include "service/impala-server.h"
@@ -303,6 +304,8 @@ Status ExecEnv::Init() {
     // Initialization needs to happen in the following order due to dependencies:
     // - RPC manager, DataStreamService and DataStreamManager.
     RETURN_IF_ERROR(rpc_mgr_->Init());
+    control_svc_.reset(new ControlService(rpc_metrics_));
+    RETURN_IF_ERROR(control_svc_->Init());
     data_svc_.reset(new DataStreamService(rpc_metrics_));
     RETURN_IF_ERROR(data_svc_->Init());
     RETURN_IF_ERROR(KrpcStreamMgr()->Init(data_svc_->mem_tracker()));

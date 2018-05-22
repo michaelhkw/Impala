@@ -17,6 +17,8 @@
 
 // Common protobuf definitions.
 
+syntax="proto2";
+
 package impala;
 
 // Proto-serialized version of Impala's Status object.
@@ -36,4 +38,35 @@ message UniqueIdPB {
 enum CompressionType {
   NONE = 0; // No compression.
   LZ4 = 1;
-};
+}
+
+// The kind of value that a metric represents.
+enum MetricKindPB {
+  // May go up or down over time
+  GAUGE = 0;
+  // A strictly increasing value
+  COUNTER = 1;
+  // Fixed; will never change
+  PROPERTY = 2;
+  STATS = 3;
+  SET = 4;
+  HISTOGRAM = 5;
+}
+
+// Metric and counter data types.
+enum UnitType {
+  // A dimensionless numerical quantity
+  UNIT = 0;
+  // Rate of a dimensionless numerical quantity
+  UNIT_PER_SECOND = 1;
+  CPU_TICKS = 2;
+  BYTES = 3;
+  BYTES_PER_SECOND = 4;
+  TIME_NS = 5;
+  DOUBLE_VALUE = 6;
+  // No units at all, may not be a numerical quantity
+  NO_UNIT = 7;
+  TIME_MS = 8;
+  TIME_S = 9;
+  TIME_US = 10;
+}

@@ -35,8 +35,6 @@ class ImpalaInternalService : public ImpalaInternalServiceIf {
       const TExecQueryFInstancesParams& params);
   virtual void CancelQueryFInstances(TCancelQueryFInstancesResult& return_val,
       const TCancelQueryFInstancesParams& params);
-  virtual void ReportExecStatus(TReportExecStatusResult& return_val,
-      const TReportExecStatusParams& params);
   virtual void TransmitData(TTransmitDataResult& return_val,
       const TTransmitDataParams& params);
   virtual void UpdateFilter(TUpdateFilterResult& return_val,
