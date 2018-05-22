@@ -630,7 +630,7 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
 
     uint8_t* header_buffer;
     uint32_t header_len;
-    RETURN_IF_ERROR(parent_->thrift_serializer_->Serialize(
+    RETURN_IF_ERROR(parent_->thrift_serializer_->SerializeToBuffer(
         &header, &header_len, &header_buffer));
     RETURN_IF_ERROR(parent_->Write(header_buffer, header_len));
     *file_pos += header_len;
@@ -668,7 +668,7 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
     uint8_t* buffer = nullptr;
     uint32_t len = 0;
     RETURN_IF_ERROR(
-        parent_->thrift_serializer_->Serialize(&page.header, &len, &buffer));
+        parent_->thrift_serializer_->SerializeToBuffer(&page.header, &len, &buffer));
     RETURN_IF_ERROR(parent_->Write(buffer, len));
     *file_pos += len;
 
@@ -793,7 +793,7 @@ Status HdfsParquetTableWriter::BaseColumnWriter::FinalizeCurrentPage() {
   // Add the size of the data page header
   uint8_t* header_buffer;
   uint32_t header_len = 0;
-  RETURN_IF_ERROR(parent_->thrift_serializer_->Serialize(
+  RETURN_IF_ERROR(parent_->thrift_serializer_->SerializeToBuffer(
       &current_page_->header, &header_len, &header_buffer));
 
   current_page_->finalized = true;
@@ -1138,7 +1138,7 @@ Status HdfsParquetTableWriter::Finalize() {
   RETURN_IF_ERROR(FlushCurrentRowGroup());
   RETURN_IF_ERROR(WritePageIndex());
   RETURN_IF_ERROR(WriteFileFooter());
-  stats_.__set_parquet_stats(parquet_insert_stats_);
+  *stats_.mutable_parquet_stats() = parquet_insert_stats_;
   COUNTER_ADD(parent_->rows_inserted_counter(), row_count_);
   return Status::OK();
 }
@@ -1186,8 +1186,9 @@ Status HdfsParquetTableWriter::FlushCurrentRowGroup() {
     current_row_group_->num_rows = col_writer->num_values();
     current_row_group_->columns[i].file_offset = file_pos_;
     const string& col_name = table_desc_->col_descs()[i + num_clustering_cols].name();
-    parquet_insert_stats_.per_column_size[col_name] +=
-        col_writer->total_compressed_size();
+    google::protobuf::Map<string,int64>* column_size_map =
+        parquet_insert_stats_.mutable_per_column_size();
+    (*column_size_map)[col_name] += col_writer->total_compressed_size();
 
     // Write encodings and encoding stats for this column
     col_metadata.encodings.clear();
@@ -1227,8 +1228,8 @@ Status HdfsParquetTableWriter::FlushCurrentRowGroup() {
     // written without buffering.
     uint8_t* buffer = nullptr;
     uint32_t len = 0;
-    RETURN_IF_ERROR(
-        thrift_serializer_->Serialize(&current_row_group_->columns[i], &len, &buffer));
+    RETURN_IF_ERROR(thrift_serializer_->SerializeToBuffer(
+        &current_row_group_->columns[i], &len, &buffer));
     RETURN_IF_ERROR(Write(buffer, len));
     file_pos_ += len;
   }
@@ -1265,7 +1266,8 @@ Status HdfsParquetTableWriter::WritePageIndex() {
     column.column_index_.__isset.null_counts = true;
     uint8_t* buffer = nullptr;
     uint32_t len = 0;
-    RETURN_IF_ERROR(thrift_serializer_->Serialize(&column.column_index_, &len, &buffer));
+    RETURN_IF_ERROR(thrift_serializer_->SerializeToBuffer(
+        &column.column_index_, &len, &buffer));
     RETURN_IF_ERROR(Write(buffer, len));
     // Update the column_index_offset and column_index_length of the ColumnChunk
     row_group->columns[i].__set_column_index_offset(file_pos_);
@@ -1277,7 +1279,8 @@ Status HdfsParquetTableWriter::WritePageIndex() {
     auto& column = *columns_[i];
     uint8_t* buffer = nullptr;
     uint32_t len = 0;
-    RETURN_IF_ERROR(thrift_serializer_->Serialize(&column.offset_index_, &len, &buffer));
+    RETURN_IF_ERROR(thrift_serializer_->SerializeToBuffer(
+        &column.offset_index_, &len, &buffer));
     RETURN_IF_ERROR(Write(buffer, len));
     // Update the offset_index_offset and offset_index_length of the ColumnChunk
     row_group->columns[i].__set_offset_index_offset(file_pos_);
@@ -1293,8 +1296,8 @@ Status HdfsParquetTableWriter::WriteFileFooter() {
   // Write file_meta_data
   uint32_t file_metadata_len = 0;
   uint8_t* buffer = nullptr;
-  RETURN_IF_ERROR(
-      thrift_serializer_->Serialize(&file_metadata_, &file_metadata_len, &buffer));
+  RETURN_IF_ERROR(thrift_serializer_->SerializeToBuffer(
+      &file_metadata_, &file_metadata_len, &buffer));
   RETURN_IF_ERROR(Write(buffer, file_metadata_len));
 
   // Write footer
