@@ -100,3 +100,8 @@ struct TRuntimeProfileNode {
 struct TRuntimeProfileTree {
   1: required list<TRuntimeProfileNode> nodes
 }
+
+// A list of TRuntimeProfileTree structures.
+struct TRuntimeProfileForest {
+  1: required list<TRuntimeProfileTree> profile_trees
+}

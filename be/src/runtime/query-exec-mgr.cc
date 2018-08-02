@@ -59,7 +59,7 @@ Status QueryExecMgr::StartQuery(const TExecQueryFInstancesParams& params) {
   // query startup (which takes ownership of the QueryState reference)
   unique_ptr<Thread> t;
   status = Thread::Create("query-exec-mgr",
-      Substitute("start-query-finstances-$0", PrintId(query_id)),
+      Substitute("query-state-$0", PrintId(query_id)),
           &QueryExecMgr::StartQueryHelper, this, qs, &t, true);
   if (!status.ok()) {
     // decrement refcount taken in QueryState::Init()
@@ -126,7 +126,8 @@ QueryState* QueryExecMgr::GetOrCreateQueryState(
 
 
 void QueryExecMgr::StartQueryHelper(QueryState* qs) {
-  qs->StartFInstances();
+  // Start the query fragment instances and wait for completion or errors.
+  if (LIKELY(qs->StartFInstances())) qs->MonitorFInstances();
 
 #if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   // tcmalloc and address or thread sanitizer cannot be used together

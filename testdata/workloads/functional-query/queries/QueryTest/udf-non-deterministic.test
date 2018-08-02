@@ -15,3 +15,13 @@ BIGINT
 7
 8
 ====
+---- QUERY
+# Due to IMPALA-3860, the error is not propagated when expr rewrites is enabled.
+select mem_test_leaks(100);
+---- TYPES
+bigint
+---- RESULTS
+100
+---- ERRORS
+UDF WARNING: Memory leaked via FunctionContext::Allocate(), 100 bytes leaked via FunctionContext::TrackAllocation()
+====

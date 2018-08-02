@@ -103,7 +103,7 @@ void ControlService::ReportExecStatus(const ReportExecStatusRequestPB* request,
   // sidecar and deserialize the thrift profile if there is any. The sender may have
   // failed to serialize the Thrift profile so an empty thrift profile is valid.
   // TODO: Fix IMPALA-7232 to indicate incomplete profile in this case.
-  TRuntimeProfileTree thrift_profile;
+  TRuntimeProfileForest thrift_profiles;
   if (LIKELY(request->has_thrift_profiles_sidecar_idx())) {
     kudu::Slice thrift_profile_slice;
     kudu::Status sidecar_status = rpc_context->GetInboundSidecar(
@@ -112,7 +112,7 @@ void ControlService::ReportExecStatus(const ReportExecStatusRequestPB* request,
         << FromKuduStatus(sidecar_status, "Failed to get sidecar").GetDetail();
     uint32_t len = thrift_profile_slice.size();
     Status deserialize_status = DeserializeThriftMsg(thrift_profile_slice.data(),
-        &len, true, &thrift_profile);
+        &len, true, &thrift_profiles);
     Status debug_status =
         DebugAction(request_state->query_options(), "REPORT_EXEC_STATUS_PROFILE");
     if (UNLIKELY(!deserialize_status.ok() || !debug_status.ok())) {
@@ -121,12 +121,12 @@ void ControlService::ReportExecStatus(const ReportExecStatusRequestPB* request,
           deserialize_status.GetDetail());
       // Swap with an empty profile if we fail to deserialize the profile to avoid using
       // a partially populated profile.
-      TRuntimeProfileTree empty_profile;
-      swap(thrift_profile, empty_profile);
+      TRuntimeProfileForest empty_profiles;
+      swap(thrift_profiles, empty_profiles);
     }
   }
 
-  Status resp_status = request_state->UpdateBackendExecStatus(*request, thrift_profile);
+  Status resp_status = request_state->UpdateBackendExecStatus(*request, thrift_profiles);
   RespondAndReleaseRpc(resp_status, response, rpc_context);
 }
 
