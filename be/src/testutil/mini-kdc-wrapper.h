@@ -21,6 +21,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <gtest/gtest.h>
+#include <unordered_map>
 
 #include "common/status.h"
 #include "kudu/security/test/mini_kdc.h"
@@ -43,18 +44,32 @@ class MiniKdcWrapper {
   /// This function creates the 'unique_test_dir_' path, starts the KDC and sets the
   /// appropriate flags that Impala requires to run with Kerberos. The newly created
   /// KDC is stored in 'kdc_ptr'. Return error status on failure.
-  static Status SetupAndStartMiniKDC(std::string spn, std::string realm,
-      std::string ticket_lifetime, std::string renew_lifetime, int kdc_port,
-      std::unique_ptr<MiniKdcWrapper>* kdc_ptr);
+  static Status SetupAndStartMiniKDC(const std::string& realm,
+      const std::string& ticket_lifetime, const std::string& renew_lifetime,
+      int kdc_port, std::unique_ptr<MiniKdcWrapper>* kdc_ptr);
 
   /// Undoes everything done by SetupAndStartMiniKDC().
   Status TearDownMiniKDC();
 
+  /// Kinit a user to the mini KDC.
+  Status Kinit(const string& username);
+
+  /// Creates a new user with the given username.
+  /// The password is the same as the username.
+  Status CreateUserPrincipal(const string& username);
+
+  /// Creates a keytab file under the 'unique_test_dir_' path which is configured to
+  /// authenticate the service principal 'spn'. The path to the file is returned as a
+  /// string in 'kt_path'.
+  Status CreateServiceKeytab(const string& spn, string* kt_path);
+
+  /// Returns the environment variable ""KRB5CCNAME" configured in the setup of mini-kdc.
+  const string GetKrb5CCname() const {
+    return kdc_->GetEnvVars()["KRB5CCNAME"];
+  }
+
  private:
   boost::scoped_ptr<kudu::MiniKdc> kdc_;
-
-  /// The service's principal name.
-  const std::string spn_;
 
   /// The name of the kerberos realm to setup.
   const std::string realm_;
@@ -72,10 +87,9 @@ class MiniKdcWrapper {
   boost::filesystem::path unique_test_dir_ = boost::filesystem::unique_path();
 
   /// Called by SetupAndStartMiniKDC() only.
-  MiniKdcWrapper(std::string spn, std::string realm, std::string ticket_lifetime,
-    std::string renew_lifetime, int kdc_port) :
-      spn_(spn),
-      realm_(realm),
+  MiniKdcWrapper(const std::string& realm, const std::string& ticket_lifetime,
+      const std::string& renew_lifetime, int kdc_port)
+    : realm_(realm),
       ticket_lifetime_(ticket_lifetime),
       renew_lifetime_(renew_lifetime),
       kdc_port_(kdc_port) {
@@ -83,15 +97,10 @@ class MiniKdcWrapper {
 
   /// Starts the KDC and configures it to use 'keytab_dir' as the location to store the
   /// keytab. The 'keytab_dir' will not be cleaned up by this class.
-  Status StartKdc(string keytab_dir);
+  Status StartKdc(const string& keytab_dir);
 
   /// Stops the KDC by terminating the krb5kdc subprocess.
   Status StopKdc();
-
-  /// Creates a keytab file under the 'unique_test_dir_' path which is configured to
-  /// authenticate the service principal 'spn_'. The path to the file is returned as a
-  /// string in 'kt_path'.
-  Status CreateServiceKeytab(const string& spn, string* kt_path);
 };
 
 }

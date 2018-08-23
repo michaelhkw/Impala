@@ -15,14 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "rpc/rpc-mgr-test-base.h"
+#include "exec/kudu-util.h"
+#include "kudu/security/init.h"
+#include "rpc/rpc-mgr-test.h"
 #include "service/fe-support.h"
+#include "testutil/mini-kdc-wrapper.h"
 
 DECLARE_bool(use_kudu_kinit);
 DECLARE_bool(use_krpc);
 
 DECLARE_string(be_principal);
 DECLARE_string(hostname);
+DECLARE_string(keytab_file);
+DECLARE_string(krb5_ccname);
 DECLARE_string(principal);
 DECLARE_string(ssl_client_ca_certificate);
 DECLARE_string(ssl_server_certificate);
@@ -30,36 +35,34 @@ DECLARE_string(ssl_private_key);
 
 // The principal name and the realm used for creating the mini-KDC.
 // To be initialized at main().
-static string kdc_principal;
-static string kdc_realm;
+static string kdc_ccname;
+static string principal;
+static string principal_kt_path;
+static string realm;
 
 namespace impala {
 
-class RpcMgrKerberizedTest :
-    public RpcMgrTestBase<testing::TestWithParam<KerberosSwitch> > {
-
+class RpcMgrKerberizedTest : public RpcMgrTest {
+ protected:
   virtual void SetUp() override {
-    KerberosSwitch k = GetParam();
     FLAGS_use_krpc = true;
-    FLAGS_use_kudu_kinit = k == USE_KRPC_KUDU_KERBEROS;
+    FLAGS_use_kudu_kinit = true;
     FLAGS_principal = "dummy-service/host@realm";
-    FLAGS_be_principal = strings::Substitute("$0@$1", kdc_principal, kdc_realm);
+    FLAGS_be_principal = strings::Substitute("$0@$1", principal, realm);
+    FLAGS_keytab_file = principal_kt_path;
     ASSERT_OK(InitAuth(CURRENT_EXECUTABLE_PATH));
-    RpcMgrTestBase::SetUp();
+    RpcMgrTest::SetUp();
   }
 
   virtual void TearDown() override {
     FLAGS_principal.clear();
     FLAGS_be_principal.clear();
+    FLAGS_keytab_file.clear();
+    RpcMgrTest::TearDown();
   }
 };
 
-INSTANTIATE_TEST_CASE_P(KerberosOnAndOff,
-                        RpcMgrKerberizedTest,
-                        ::testing::Values(USE_KRPC_IMPALA_KERBEROS,
-                                          USE_KRPC_KUDU_KERBEROS));
-
-TEST_P(RpcMgrKerberizedTest, MultipleServicesTls) {
+TEST_F(RpcMgrKerberizedTest, MultipleServicesTls) {
   // TODO: We're starting a seperate RpcMgr here instead of configuring
   // RpcTestBase::rpc_mgr_ to use TLS. To use RpcTestBase::rpc_mgr_, we need to introduce
   // new gtest params to turn on TLS which needs to be a coordinated change across
@@ -76,8 +79,56 @@ TEST_P(RpcMgrKerberizedTest, MultipleServicesTls) {
   ScopedSetTlsFlags s(SERVER_CERT, PRIVATE_KEY, SERVER_CERT);
   ASSERT_OK(tls_rpc_mgr.Init());
 
-  ASSERT_OK(RunMultipleServicesTestTemplate(this, &tls_rpc_mgr, tls_krpc_address));
+  ASSERT_OK(RunMultipleServicesTest(&tls_rpc_mgr, tls_krpc_address));
   tls_rpc_mgr.Shutdown();
+}
+
+// This test aims to exercise the authorization function in RpcMgr by accessing
+// services with a principal different from FLAGS_be_principal.
+TEST_F(RpcMgrKerberizedTest, AuthorizationFail) {
+  GeneratedServiceIf* ping_impl =
+      TakeOverService(make_unique<PingServiceImpl>(&rpc_mgr_));
+  GeneratedServiceIf* scan_mem_impl =
+      TakeOverService(make_unique<ScanMemServiceImpl>(&rpc_mgr_));
+  const int num_service_threads = 10;
+  const int queue_size = 10;
+  ASSERT_OK(rpc_mgr_.RegisterService(num_service_threads, queue_size, ping_impl,
+      static_cast<PingServiceImpl*>(ping_impl)->mem_tracker()));
+  ASSERT_OK(rpc_mgr_.RegisterService(num_service_threads, queue_size, scan_mem_impl,
+      static_cast<ScanMemServiceImpl*>(scan_mem_impl)->mem_tracker()));
+  FLAGS_num_acceptor_threads = 2;
+  FLAGS_num_reactor_threads = 10;
+  ASSERT_OK(rpc_mgr_.StartServices(krpc_address_));
+
+  // Switching over to a credential cache which only contains 'alice'. The kinit done
+  // in InitAuth() uses a different credential cache. We should fail to access PingService
+  // but succeed in ScanMemService which has a no-op authorization function.
+  DCHECK_NE(FLAGS_krb5_ccname, kdc_ccname);
+  discard_result(setenv("KRB5CCNAME", kdc_ccname.c_str(), 1));
+
+  RpcController controller;
+  Status rpc_status;
+
+  unique_ptr<ScanMemServiceProxy> scan_proxy;
+  ASSERT_OK(rpc_mgr_.GetProxy<ScanMemServiceProxy>(krpc_address_, &scan_proxy));
+  ScanMemRequestPB scan_request;
+  ScanMemResponsePB scan_response;
+  SetupScanMemRequest(&scan_request, &controller);
+  controller.Reset();
+  rpc_status =
+      FromKuduStatus(scan_proxy->ScanMem(scan_request, &scan_response, &controller));
+  EXPECT_TRUE(rpc_status.ok());
+
+  unique_ptr<PingServiceProxy> ping_proxy;
+  ASSERT_OK(rpc_mgr_.GetProxy<PingServiceProxy>(krpc_address_, &ping_proxy));
+  PingRequestPB ping_request;
+  PingResponsePB ping_response;
+  controller.Reset();
+  rpc_status =
+      FromKuduStatus(ping_proxy->Ping(ping_request, &ping_response, &controller));
+  EXPECT_TRUE(!rpc_status.ok());
+  EXPECT_GT(rpc_status.GetDetail().find(
+      "Not authorized: {username='alice', principal='alice@KRBTEST.COM'}"), 0);
 }
 
 } // namespace impala
@@ -93,14 +144,27 @@ int main(int argc, char** argv) {
   impala::IpAddr ip;
   impala::Status status = impala::HostnameToIpAddr(FLAGS_hostname, &ip);
   DCHECK(status.ok());
-  kdc_principal = Substitute("impala-test/$0", ip);
-  kdc_realm = "KRBTEST.COM";
+  principal = Substitute("impala-test/$0", ip);
+  realm = "KRBTEST.COM";
 
   int port = impala::FindUnusedEphemeralPort(nullptr);
   std::unique_ptr<impala::MiniKdcWrapper> kdc;
-  status = impala::MiniKdcWrapper::SetupAndStartMiniKDC(
-      kdc_principal, kdc_realm, "24h", "7d", port, &kdc);
+  status = impala::MiniKdcWrapper::SetupAndStartMiniKDC(realm, "24h", "7d", port, &kdc);
   DCHECK(status.ok());
+
+  // Create the service principal and the associated keytab used for this test.
+  status = kdc->CreateServiceKeytab(principal, &principal_kt_path);
+  DCHECK(status.ok());
+
+  // Create another principal 'alice' who is not authorized to access PingService.
+  status = kdc->CreateUserPrincipal("alice");
+  DCHECK(status.ok());
+  status = kdc->Kinit("alice");
+  DCHECK(status.ok());
+
+  // Get "KRB5CCNAME" set up by mini-kdc. It's the credential cache which contains
+  // 'alice' key.
+  kdc_ccname = kdc->GetKrb5CCname();
 
   // Fill in the path of the current binary for use by the tests.
   CURRENT_EXECUTABLE_PATH = argv[0];

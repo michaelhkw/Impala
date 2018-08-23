@@ -84,24 +84,14 @@ Status GetInternalKerberosPrincipal(string* out_principal) {
 Status ParseKerberosPrincipal(const string& principal, string* service_name,
     string* hostname, string* realm) {
   vector<string> names;
-
-  split(names, principal, is_any_of("/"));
-  if (names.size() != 2) return Status(TErrorCode::BAD_PRINCIPAL_FORMAT, principal);
-
+  split(names, principal, is_any_of("/@"));
+  if (UNLIKELY(names.size() != 3)) {
+    return Status(TErrorCode::BAD_PRINCIPAL_FORMAT, principal);
+  }
   *service_name = names[0];
-
-  string remaining_principal = names[1];
-  split(names, remaining_principal, is_any_of("@"));
-  if (names.size() != 2) return Status(TErrorCode::BAD_PRINCIPAL_FORMAT, principal);
-
-  *hostname = names[0];
-  *realm = names[1];
-
+  *hostname = names[1];
+  *realm = names[2];
   return Status::OK();
-}
-
-bool IsKerberosEnabled() {
-  return !FLAGS_principal.empty();
 }
 
 }
