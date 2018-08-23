@@ -22,7 +22,9 @@
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/result_tracker.h"
 #include "kudu/util/metrics.h"
+#include "rpc/authentication.h"
 #include "rpc/impala-service-pool.h"
+#include "util/auth-util.h"
 
 #include "gen-cpp/Types_types.h"
 
@@ -133,6 +135,16 @@ class RpcMgr {
       kudu::rpc::GeneratedServiceIf* service_ptr, MemTracker* service_mem_tracker)
       WARN_UNUSED_RESULT;
 
+  /// Returns true if the given 'remote_user' in RpcContext 'context' is authorized to
+  /// access 'service_name' registered with this RpcMgr. Authorization is only enforced
+  /// when Kerberos is enabled.
+  ///
+  /// If authorization is denied, the RPC is responded to with an error message. Memory
+  /// of RPC payloads accounted towards 'mem_tracker', the service's MemTracker, is also
+  /// released.
+  bool Authorize(const string& service_name, kudu::rpc::RpcContext* context,
+      MemTracker* mem_tracker) const;
+
   /// Creates a new proxy for a remote service of type P at location 'address' with
   /// hostname 'hostname' and places it in 'proxy'. 'P' must descend from
   /// kudu::rpc::ServiceIf. Note that 'address' must be a resolved IP address.
@@ -197,6 +209,11 @@ class RpcMgr {
   /// True if TLS is configured for communication between Impala backends. messenger_ will
   /// be configured to use TLS if this is set.
   const bool use_tls_;
+
+  /// The service name authorized to access the Impala backend services registered with
+  /// this RpcMgr; Derived from FLAGS_principal/FLAGS_be_prinicipal. Set in Init() when
+  /// Kerberos is enabled;
+  string authorized_service_name_;
 };
 
 } // namespace impala
