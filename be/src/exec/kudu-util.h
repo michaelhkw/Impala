@@ -29,6 +29,8 @@ struct tm;
 #include "runtime/string-value.h"
 #include "runtime/types.h"
 
+#include "common/names.h" // for strings::Substitute()
+
 namespace impala {
 
 /// Takes a Kudu status and returns an impala one, if it's not OK.
