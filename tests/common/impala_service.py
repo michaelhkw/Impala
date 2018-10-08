@@ -59,7 +59,7 @@ class BaseImpalaService(object):
           context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
         url = "%s://%s:%d/%s" % \
             (protocol, self.hostname, int(self.webserver_port), page_name)
-        return urllib.urlopen(url, context=context)
+        return urllib.urlopen(url)
       except Exception:
         LOG.info("Debug webpage not yet available.")
       sleep(interval)
