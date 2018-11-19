@@ -202,8 +202,9 @@ class ImpalaBeeswaxClient(object):
       result.start_time = start_time
       result.exec_summary = self.get_exec_summary_and_parse(handle)
       result.log = self.get_log(handle.log_context)
-      result.runtime_profile = self.get_runtime_profile(handle)
       self.close_query(handle)
+      # Get the profile after unregistering the query so ExecSummary is included in it.
+      result.runtime_profile = self.get_runtime_profile(handle)
     return result
 
   def get_exec_summary(self, handle):

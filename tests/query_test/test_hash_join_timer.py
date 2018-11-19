@@ -106,10 +106,7 @@ class TestHashJoinTimer(ImpalaTestSuite):
       verifier.wait_for_metric("impala-server.num-fragments-in-flight", 0)
 
     # Execute async to get a handle. Wait until the query has completed.
-    handle = self.execute_query_async(query, vector.get_value('exec_option'))
-    self.impalad_test_service.wait_for_query_state(self.client, handle,
-        self.client.QUERY_STATES['FINISHED'], timeout=40)
-    self.close_query(handle)
+    result = self.execute_query(query, vector.get_value('exec_option'))
 
     # Parse the query profile
     # The hash join node is "id=3".
@@ -118,7 +115,8 @@ class TestHashJoinTimer(ImpalaTestSuite):
     # non-child time.
     # Also verify that the build side is in a different thread by searching for:
     #     "Join Build-Side Prepared Asynchronously"
-    profile = self.client.get_runtime_profile(handle)
+    profile = result.runtime_profile
+
     check_execsummary_count = 0
     check_fragment_count = 0
     asyn_build = False
