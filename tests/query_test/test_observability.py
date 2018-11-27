@@ -15,14 +15,16 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from datetime import datetime
+from math import ceil
 from tests.common.impala_cluster import ImpalaCluster
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfS3, SkipIfABFS, SkipIfADLS, SkipIfIsilon, SkipIfLocal
 from tests.util.filesystem_utils import IS_EC
+from time import sleep, time
 import logging
 import pytest
 import re
-import time
 
 class TestObservability(ImpalaTestSuite):
   @classmethod
@@ -59,6 +61,55 @@ class TestObservability(ImpalaTestSuite):
     assert result.exec_summary[5]['num_rows'] == 25
     assert result.exec_summary[5]['est_num_rows'] == 25
     assert result.exec_summary[5]['peak_mem'] > 0
+
+  def test_report_time(self):
+    """ Regression test for IMPALA-6741 - checks that last reporting time exists in
+    profiles of fragment instances. Also, validates that the reporting times are mostly
+    monotonic."""
+    query = """select count(distinct a.int_col) from functional.alltypes a
+        inner join functional.alltypessmall b on (a.id = b.id + cast(sleep(10) as INT))"""
+    handle = self.client.execute_async(query)
+    query_id = handle.get_handle().id
+
+    # Maximum amount of time we will spend in the test loop before giving up. It's
+    # possible that the desired query state may never be reached within this time bound.
+    MAX_WAIT_TIME = 15
+    start_time = time()
+    report_time_dict = {}
+    num_time_backward = 0
+    while self.client.get_state(handle) != self.client.QUERY_STATES['FINISHED'] and \
+        time() - start_time < MAX_WAIT_TIME:
+      sleep(1)
+      tree = self.impalad_test_service.get_thrift_profile(query_id)
+      if not tree:
+        continue
+
+      time_backward = False
+      query_start_time_str = tree.nodes[1].info_strings["Start Time"].split(".")[0]
+      query_start_time = datetime.strptime(query_start_time_str, '%Y-%m-%d %H:%M:%S')
+      for node in tree.nodes[2:]:
+        if node.name.startswith('Instance '):
+          report_time_str = (node.info_strings['Last report received time']).split(".")[0]
+          report_time = datetime.strptime(report_time_str, '%Y-%m-%d %H:%M:%S')
+          # Time should mostly be monotonic if not for NTP adjustment.
+          if report_time < report_time_dict.get(node.name, datetime.min):
+            time_backward = True
+          # If there hasn't been any occurrence of time going backward, the report time
+          # should be no earlier than the query start time.
+          if not time_backward and num_time_backward == 0:
+            assert query_start_time <= report_time
+          # Record the last report time for this fragment instance
+          report_time_dict[node.name] = report_time
+
+      # Record the number of times we have seen time going backward.
+      if time_backward:
+        num_time_backward += 1
+
+    # Minimum NTP poll period is 8 seconds.
+    MIN_NTP_POLL_PERIOD = 8.0
+    elapsed_time = time() - start_time
+    assert num_time_backward <= ceil(elapsed_time / MIN_NTP_POLL_PERIOD)
+    self.client.fetch(query, handle)
 
   @SkipIfS3.hbase
   @SkipIfLocal.hbase
@@ -276,13 +327,13 @@ class TestThriftProfile(ImpalaTestSuite):
     self.client.close()
 
     MAX_WAIT = 300
-    start = time.time()
+    start = time()
     end = start + MAX_WAIT
-    while time.time() <= end:
+    while time() <= end:
       # Sleep before trying to fetch the profile. This helps to prevent a warning when the
       # profile is not yet available immediately. It also makes it less likely to
       # introduce an error below in future changes by forgetting to sleep.
-      time.sleep(1)
+      sleep(1)
       tree = self.impalad_test_service.get_thrift_profile(query_id)
       if not tree:
         continue
@@ -295,7 +346,7 @@ class TestThriftProfile(ImpalaTestSuite):
       start_time_sub_sec_str = start_time.split('.')[-1]
       end_time_sub_sec_str = end_time.split('.')[-1]
       if len(end_time_sub_sec_str) == 0:
-        elapsed = time.time() - start
+        elapsed = time() - start
         logging.info("end_time_sub_sec_str hasn't shown up yet, elapsed=%d", elapsed)
         continue
 
