@@ -264,9 +264,8 @@ class HdfsScanNodeBase : public ScanNode {
 
   /// Old API for compatibility with text scanners (e.g. LZO text scanner).
   io::ScanRange* AllocateScanRange(hdfsFS fs, const char* file, int64_t len,
-      int64_t offset, int64_t partition_id, int disk_id, bool try_cache,
-      bool expected_local, int mtime,
-      bool is_erasure_coded = false,
+      int64_t offset, int64_t partition_id, int disk_id, int8_t cache_tags,
+      bool expected_local, int mtime, bool is_erasure_coded = false,
       const io::ScanRange* original_split = NULL);
 
   /// Adds ranges to the io mgr queue. Can be overridden to add scan-node specific

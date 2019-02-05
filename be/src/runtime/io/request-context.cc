@@ -398,7 +398,7 @@ Status RequestContext::AddScanRanges(
     // Don't add empty ranges.
     DCHECK_NE(range->len(), 0);
     AddActiveScanRangeLocked(lock, range);
-    if (range->try_cache()) {
+    if (range->cache_tags() != BufferOpts::UNCACHED) {
       cached_ranges_.Enqueue(range);
     } else {
       AddRangeToDisk(lock, range, (enqueue_location == EnqueueLocation::HEAD) ?
@@ -432,7 +432,7 @@ Status RequestContext::GetNextUnstartedRange(ScanRange** range, bool* needs_buff
     if (!cached_ranges_.empty()) {
       // We have a cached range.
       *range = cached_ranges_.Dequeue();
-      DCHECK((*range)->try_cache());
+      DCHECK((*range)->cache_tags() != BufferOpts::UNCACHED);
       bool cached_read_succeeded;
       RETURN_IF_ERROR(TryReadFromCache(lock, *range, &cached_read_succeeded,
           needs_buffers));
@@ -480,7 +480,7 @@ Status RequestContext::StartScanRange(ScanRange* range, bool* needs_buffers) {
   if (state_ == RequestContext::Cancelled) return CONTEXT_CANCELLED;
 
   DCHECK_NE(range->len(), 0);
-  if (range->try_cache()) {
+  if (range->cache_tags() != BufferOpts::UNCACHED) {
     bool cached_read_succeeded;
     RETURN_IF_ERROR(TryReadFromCache(lock, range, &cached_read_succeeded,
         needs_buffers));
@@ -516,7 +516,7 @@ Status RequestContext::TryReadFromCache(const unique_lock<mutex>& lock,
   // ** CLIENT_BUFFER: the client already provided a buffer to copy data into it
   *needs_buffers = buffer_tag == ScanRange::ExternalBufferTag::NO_BUFFER;
   if (*needs_buffers) {
-    DCHECK(range->HasSubRanges());
+    //DCHECK(range->HasSubRanges());
     range->SetBlockedOnBuffer();
     // The range will be scheduled when buffers are added to it.
     AddRangeToDisk(lock, range, ScheduleMode::BY_CALLER);

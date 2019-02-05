@@ -35,6 +35,7 @@
 #include "runtime/exec-env.h"
 #include "runtime/io/disk-io-mgr.h"
 #include "runtime/io/request-context.h"
+#include "runtime/io/request-ranges.h"
 #include "runtime/mem-pool.h"
 #include "runtime/runtime-state.h"
 #include "runtime/tuple-row.h"
@@ -1019,7 +1020,7 @@ Status BaseScalarColumnReader::Reset(const HdfsFileDesc& file_desc,
   scan_range_ = parent_->scan_node_->AllocateScanRange(metadata_range->fs(),
       filename(), col_len, col_start, partition_id, split_range->disk_id(),
       col_range_local, split_range->is_erasure_coded(),
-      BufferOpts(split_range->try_cache(), file_desc.mtime));
+      BufferOpts(split_range->cache_tags(), file_desc.mtime));
   ClearDictionaryDecoder();
   return Status::OK();
 }

@@ -25,6 +25,7 @@
 #include "exec/read-write-util.h"
 #include "exec/text-converter.inline.h"
 #include "runtime/collection-value-builder.h"
+#include "runtime/exec-env.h"
 #include "runtime/hdfs-fs-cache.h"
 #include "runtime/runtime-filter.inline.h"
 #include "runtime/tuple-row.h"
@@ -808,20 +809,25 @@ Status HdfsScanner::IssueFooterRanges(HdfsScanNodeBase* scan_node,
         // the actual split (in InitColumns()). The original split is stored in the
         // metadata associated with the footer range.
         ScanRange* footer_range;
+        bool cache_footer = file_type == THdfsFileFormat::PARQUET &&
+            ExecEnv::GetInstance()->parquet_footer_cache() != nullptr;
         if (footer_split != nullptr) {
+          int8_t cache_tags = footer_split->cache_tags();
+          if (cache_footer) cache_tags |= BufferOpts::EXT_CACHED;
           footer_range = scan_node->AllocateScanRange(files[i]->fs,
               files[i]->filename.c_str(), footer_size, footer_start,
               split_metadata->partition_id, footer_split->disk_id(),
               footer_split->expected_local(), files[i]->is_erasure_coded,
-              BufferOpts(footer_split->try_cache(), files[i]->mtime), split);
+              BufferOpts(cache_tags, files[i]->mtime), split);
         } else {
           // If we did not find the last split, we know it is going to be a remote read.
           footer_range =
               scan_node->AllocateScanRange(files[i]->fs, files[i]->filename.c_str(),
                    footer_size, footer_start, split_metadata->partition_id, -1, false,
-                   files[i]->is_erasure_coded, BufferOpts::Uncached(), split);
+                   files[i]->is_erasure_coded,
+                   BufferOpts(cache_footer ? BufferOpts::EXT_CACHED : BufferOpts::UNCACHED, -1),
+                   split);
         }
-
         footer_ranges.push_back(footer_range);
       } else {
         scan_node->RangeComplete(file_type, THdfsCompression::NONE);
