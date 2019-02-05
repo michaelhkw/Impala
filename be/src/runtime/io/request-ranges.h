@@ -166,52 +166,63 @@ class RequestRange : public InternalQueue<RequestRange>::Node {
 struct BufferOpts {
  public:
   // Set options for a read into an IoMgr-allocated or HDFS-cached buffer. Caching is
-  // enabled if 'try_cache' is true, the file is in the HDFS cache and 'mtime' matches
+  // enabled if 'cache_tags' is true, the file is in the HDFS cache and 'mtime' matches
   // the modified time of the cached file in the HDFS cache.
-  BufferOpts(bool try_cache, int64_t mtime)
-    : try_cache_(try_cache),
+  BufferOpts(int8_t cache_tags, int64_t mtime)
+    : cache_tags_(cache_tags),
       mtime_(mtime),
       client_buffer_(nullptr),
-      client_buffer_len_(-1) {}
+      client_buffer_len_(-1) {
+    DCHECK_EQ(cache_tags_ & INVALID_TAGS, 0);
+  }
 
   /// Set options for an uncached read into an IoMgr-allocated buffer.
   static BufferOpts Uncached() {
-    return BufferOpts(false, NEVER_CACHE, nullptr, -1);
+    return BufferOpts(UNCACHED, NEVER_CACHE, nullptr, -1);
   }
 
   /// Set options to read the entire scan range into 'client_buffer'. The length of the
   /// buffer, 'client_buffer_len', must fit the entire scan range. HDFS caching is not
   /// enabled in this case.
   static BufferOpts ReadInto(uint8_t* client_buffer, int64_t client_buffer_len) {
-    return BufferOpts(false, NEVER_CACHE, client_buffer, client_buffer_len);
+    return BufferOpts(UNCACHED, NEVER_CACHE, client_buffer, client_buffer_len);
   }
 
   /// Use only when you don't want to to read the entire scan range, but only sub-ranges
   /// in it. In this case you can copy the relevant parts from the HDFS cache into the
   /// client buffer. The length of the buffer, 'client_buffer_len' must fit the
   /// concatenation of all the sub-ranges.
-  static BufferOpts ReadInto(bool try_cache, int64_t mtime, uint8_t* client_buffer,
+  static BufferOpts ReadInto(int8_t cache_tags, int64_t mtime, uint8_t* client_buffer,
       int64_t client_buffer_len) {
-    return BufferOpts(try_cache, mtime, client_buffer, client_buffer_len);
+    return BufferOpts(cache_tags, mtime, client_buffer, client_buffer_len);
   }
+
+  enum CacheTag {
+    UNCACHED = 0,
+    FS_CACHED = 1,
+    EXT_CACHED = 2,
+    INVALID_TAGS = ~0x3
+  };
 
  private:
   friend class ScanRange;
   friend class HdfsFileReader;
 
-  BufferOpts(
-      bool try_cache, int64_t mtime, uint8_t* client_buffer, int64_t client_buffer_len)
-    : try_cache_(try_cache),
+  BufferOpts(int8_t cache_tags, int64_t mtime, uint8_t* client_buffer,
+      int64_t client_buffer_len)
+    : cache_tags_(cache_tags),
       mtime_(mtime),
       client_buffer_(client_buffer),
-      client_buffer_len_(client_buffer_len) {}
+      client_buffer_len_(client_buffer_len) {
+    DCHECK_EQ(cache_tags_ & INVALID_TAGS, 0);
+  }
 
   /// If 'mtime_' is set to NEVER_CACHE, the file handle will never be cached, because
   /// the modification time won't match.
   const static int64_t NEVER_CACHE = -1;
 
-  /// If true, read from HDFS cache if possible.
-  const bool try_cache_;
+  /// Composed of a subset of CacheTag declared above.
+  const int8_t cache_tags_;
 
   /// Last modified time of the file associated with the scan range. If set to
   /// NEVER_CACHE, caching is disabled.
@@ -259,7 +270,11 @@ class ScanRange : public RequestRange {
       std::vector<SubRange>&& sub_ranges, void* meta_data = nullptr);
 
   void* meta_data() const { return meta_data_; }
-  bool try_cache() const { return try_cache_; }
+  int8_t cache_tags() const { return cache_tags_; }
+  
+  /// XXX
+  const void* cache_entry() const { return cache_entry_; }
+
   bool read_in_flight() const { return read_in_flight_; }
   bool expected_local() const { return expected_local_; }
   int64_t bytes_to_read() const { return bytes_to_read_; }
@@ -317,6 +332,10 @@ class ScanRange : public RequestRange {
   /// Returns a non-ok status if it ran into a non-continuable error.
   /// The reader lock must be held by the caller.
   Status ReadFromCache(const boost::unique_lock<boost::mutex>& reader_lock,
+      bool* read_succeeded) WARN_UNUSED_RESULT;
+
+  /// XXX
+  Status ReadFromFsCache(const boost::unique_lock<boost::mutex>& reader_lock,
       bool* read_succeeded) WARN_UNUSED_RESULT;
 
   /// Add buffers for the range to read data into and schedule the range if blocked.
@@ -437,7 +456,10 @@ class ScanRange : public RequestRange {
   /// If true, this scan range is expected to be cached. Note that this might be wrong
   /// since the block could have been uncached. In that case, the cached path
   /// will fail and we'll just put the scan range on the normal read path.
-  bool try_cache_ = false;
+  int8_t cache_tags_ = BufferOpts::UNCACHED;
+
+  /// XXX
+  const void* cache_entry_ = nullptr;
 
   /// If true, we expect this scan range to be a local read. Note that if this is false,
   /// it does not necessarily mean we expect the read to be remote, and that we never

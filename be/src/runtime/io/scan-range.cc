@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+
+#include "exec/parquet/parquet-footer-cache.h"
 #include "runtime/exec-env.h"
 #include "runtime/io/disk-io-mgr.h"
 #include "runtime/io/disk-io-mgr-internal.h"
@@ -469,7 +471,7 @@ void ScanRange::Reset(hdfsFS fs, const char* file, int64_t len, int64_t offset,
   bytes_to_read_ = len;
   offset_ = offset;
   disk_id_ = disk_id;
-  try_cache_ = buffer_opts.try_cache_;
+  cache_tags_ = buffer_opts.cache_tags_;
   mtime_ = buffer_opts.mtime_;
   meta_data_ = meta_data;
   if (buffer_opts.client_buffer_ != nullptr) {
@@ -582,7 +584,26 @@ int64_t ScanRange::MaxReadChunkSize() const {
 Status ScanRange::ReadFromCache(
     const unique_lock<mutex>& reader_lock, bool* read_succeeded) {
   DCHECK(reader_lock.mutex() == &reader_->lock_ && reader_lock.owns_lock());
-  DCHECK(try_cache_);
+  DCHECK_NE(cache_tags_, BufferOpts::UNCACHED);
+  DCHECK_EQ(bytes_read_, 0);
+  *read_succeeded = false;
+
+  if ((cache_tags_ & BufferOpts::EXT_CACHED) != 0) {
+    ParquetFooterCache* footer_cache = ExecEnv::GetInstance()->parquet_footer_cache();
+    cache_entry_ = footer_cache->Probe(file_);
+    *read_succeeded = cache_entry_ != nullptr;
+    if (*read_succeeded) return Status::OK();
+  }
+  if ((cache_tags_ & BufferOpts::FS_CACHED) != 0) {
+    return ReadFromFsCache(reader_lock, read_succeeded);
+  }
+  return Status::OK();
+}
+
+Status ScanRange::ReadFromFsCache(
+    const unique_lock<mutex>& reader_lock, bool* read_succeeded) {
+  DCHECK(reader_lock.mutex() == &reader_->lock_ && reader_lock.owns_lock());
+  DCHECK_NE(cache_tags_, BufferOpts::UNCACHED);
   DCHECK_EQ(bytes_read_, 0);
   *read_succeeded = false;
   Status status = file_reader_->Open(false);

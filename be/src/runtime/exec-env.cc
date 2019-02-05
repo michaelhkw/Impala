@@ -27,6 +27,7 @@
 #include "common/logging.h"
 #include "common/object-pool.h"
 #include "exec/kudu-util.h"
+#include "exec/parquet/parquet-footer-cache.h"
 #include "gen-cpp/ImpalaInternalService.h"
 #include "kudu/rpc/service_if.h"
 #include "rpc/rpc-mgr.h"
@@ -138,6 +139,9 @@ DEFINE_int32(catalog_client_rpc_timeout_ms, 0, "(Advanced) The underlying TSocke
 DEFINE_int32(catalog_client_rpc_retry_interval_ms, 10000, "(Advanced) The time to wait "
     "before retrying when the catalog RPC client fails to connect to catalogd.");
 
+DEFINE_int64(parquet_footer_cache_size, 1 << 26, "XXX");
+DEFINE_int32(parquet_footer_cache_num_partitions, 16, "XXX");
+
 const static string DEFAULT_FS = "fs.defaultFS";
 
 namespace impala {
@@ -176,6 +180,8 @@ ExecEnv::ExecEnv(int backend_port, int krpc_port,
     frontend_(new Frontend()),
     async_rpc_pool_(new CallableThreadPool("rpc-pool", "async-rpc-sender", 8, 10000)),
     query_exec_mgr_(new QueryExecMgr()),
+    parquet_footer_cache_(new ParquetFooterCache(FLAGS_parquet_footer_cache_size,
+        FLAGS_parquet_footer_cache_num_partitions)),
     rpc_metrics_(metrics_->GetOrCreateChildGroup("rpc")),
     enable_webserver_(FLAGS_enable_webserver && webserver_port > 0),
     configured_backend_address_(MakeNetworkAddress(FLAGS_hostname, backend_port)) {

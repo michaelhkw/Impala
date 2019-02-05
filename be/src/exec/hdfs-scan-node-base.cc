@@ -231,11 +231,12 @@ Status HdfsScanNodeBase::Prepare(RuntimeState* state) {
     bool expected_local = params.__isset.is_remote && !params.is_remote;
     if (expected_local && params.volume_id == -1) ++num_ranges_missing_volume_id;
 
-    bool try_cache = params.is_cached;
+    BufferOpts::CacheTag cache_tag =
+        params.is_cached ? BufferOpts::FS_CACHED : BufferOpts::UNCACHED;
     file_desc->splits.push_back(
         AllocateScanRange(file_desc->fs, file_desc->filename.c_str(), split.length,
             split.offset, split.partition_id, params.volume_id, expected_local,
-            BufferOpts(try_cache, file_desc->mtime)));
+            BufferOpts(cache_tag, file_desc->mtime)));
   }
 
   // Update server wide metrics for number of scan ranges and ranges that have
@@ -591,11 +592,11 @@ ScanRange* HdfsScanNodeBase::AllocateScanRange(hdfsFS fs, const char* file,
   return range;
 }
 
-ScanRange* HdfsScanNodeBase::AllocateScanRange(hdfsFS fs, const char* file,
-    int64_t len, int64_t offset, int64_t partition_id, int disk_id, bool try_cache,
+ScanRange* HdfsScanNodeBase::AllocateScanRange(hdfsFS fs, const char* file, int64_t len,
+    int64_t offset, int64_t partition_id, int disk_id, int8_t cache_tags,
     bool expected_local, int mtime, const ScanRange* original_split) {
   return AllocateScanRange(fs, file, len, offset, partition_id, disk_id, expected_local,
-      BufferOpts(try_cache, mtime), original_split);
+      BufferOpts(cache_tags, mtime), original_split);
 }
 
 Status HdfsScanNodeBase::AddDiskIoRanges(const vector<ScanRange*>& ranges,

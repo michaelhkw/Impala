@@ -53,6 +53,7 @@ class KrpcDataStreamMgr;
 class LibCache;
 class MemTracker;
 class MetricGroup;
+class ParquetFooterCache;
 class PoolMemTrackerRegistry;
 class ObjectPool;
 class QueryResourceMgr;
@@ -141,6 +142,9 @@ class ExecEnv {
   BufferPool* buffer_pool() { return buffer_pool_.get(); }
   SystemStateInfo* system_state_info() { return system_state_info_.get(); }
 
+  /// XXX
+  ParquetFooterCache* parquet_footer_cache() { return parquet_footer_cache_.get(); }
+
   void set_enable_webserver(bool enable) { enable_webserver_ = enable; }
 
   Scheduler* scheduler() { return scheduler_.get(); }
@@ -209,9 +213,13 @@ class ExecEnv {
   boost::scoped_ptr<ReservationTracker> buffer_reservation_;
   boost::scoped_ptr<BufferPool> buffer_pool_;
 
+
   /// Tracks system resource usage which we then include in profiles.
   boost::scoped_ptr<SystemStateInfo> system_state_info_;
 
+  /// XXX
+  boost::scoped_ptr<ParquetFooterCache> parquet_footer_cache_;
+  
   /// Not owned by this class
   ImpalaServer* impala_server_ = nullptr;
   MetricGroup* rpc_metrics_ = nullptr;

@@ -445,6 +445,9 @@ class HdfsParquetScanner : public HdfsScanner {
   /// Number of row groups that need to be read.
   RuntimeProfile::Counter* num_row_groups_counter_;
 
+  /// XXX
+  RuntimeProfile::Counter* num_footer_cache_hit_;
+
   /// Number of scanners that end up doing no reads because their splits don't overlap
   /// with the midpoint of any row-group in the file.
   RuntimeProfile::Counter* num_scanners_with_no_reads_counter_;

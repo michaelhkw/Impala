@@ -31,6 +31,7 @@ add_library(Parquet
   parquet-collection-column-reader.cc
   parquet-column-readers.cc
   parquet-column-stats.cc
+  parquet-footer-cache.cc
   parquet-level-decoder.cc
   parquet-metadata-utils.cc
   parquet-common.cc

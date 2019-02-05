@@ -28,6 +28,7 @@
 #include "exec/parquet/parquet-collection-column-reader.h"
 #include "exec/parquet/parquet-column-readers.h"
 #include "exec/parquet/parquet-column-stats.h"
+#include "exec/parquet/parquet-footer-cache.h"
 #include "exec/scanner-context.inline.h"
 #include "rpc/thrift-util.h"
 #include "runtime/collection-value-builder.h"
@@ -117,6 +118,8 @@ Status HdfsParquetScanner::Open(ScannerContext* context) {
           TUnit::UNIT);
   num_row_groups_counter_ =
       ADD_COUNTER(scan_node_->runtime_profile(), "NumRowGroups", TUnit::UNIT);
+  num_footer_cache_hit_ =
+      ADD_COUNTER(scan_node_->runtime_profile(), "NumFooterCacheHit", TUnit::UNIT);
   num_scanners_with_no_reads_counter_ =
       ADD_COUNTER(scan_node_->runtime_profile(), "NumScannersWithNoReads", TUnit::UNIT);
   num_dict_filtered_row_groups_counter_ =
@@ -1179,110 +1182,125 @@ inline bool HdfsParquetScanner::ReadCollectionItem(
 }
 
 Status HdfsParquetScanner::ProcessFooter() {
-  const int64_t file_len = stream_->file_desc()->file_length;
-  const int64_t scan_range_len = stream_->scan_range()->len();
+  const ScanRange* scan_range = stream_->scan_range();
 
-  // We're processing the scan range issued in IssueInitialRanges(). The scan range should
-  // be the last FOOTER_BYTES of the file. !success means the file is shorter than we
-  // expect. Note we can't detect if the file is larger than we expect without attempting
-  // to read past the end of the scan range, but in this case we'll fail below trying to
-  // parse the footer.
-  DCHECK_LE(scan_range_len, FOOTER_SIZE);
-  uint8_t* buffer;
-  bool success = stream_->ReadBytes(scan_range_len, &buffer, &parse_status_);
-  if (!success) {
-    DCHECK(!parse_status_.ok());
-    if (parse_status_.code() == TErrorCode::SCANNER_INCOMPLETE_READ) {
-      VLOG_QUERY << "Metadata for file '" << filename() << "' appears stale: "
-                 << "metadata states file size to be "
-                 << PrettyPrinter::Print(file_len, TUnit::BYTES)
-                 << ", but could only read "
-                 << PrettyPrinter::Print(stream_->total_bytes_returned(), TUnit::BYTES);
-      return Status(TErrorCode::STALE_METADATA_FILE_TOO_SHORT, filename(),
+  const parquet::FileMetaData* cached_footer =
+      reinterpret_cast<const parquet::FileMetaData*>(scan_range->cache_entry());
+  ParquetFooterCache* footer_cache = ExecEnv::GetInstance()->parquet_footer_cache();
+
+  if (cached_footer != nullptr) {
+    COUNTER_ADD(num_footer_cache_hit_, 1);
+    file_metadata_ = *cached_footer;
+    footer_cache->Release(scan_range->file());
+  } else {
+    const int64_t file_len = stream_->file_desc()->file_length;
+    const int64_t scan_range_len = stream_->scan_range()->len();
+
+    // We're processing the scan range issued in IssueInitialRanges(). The scan range should
+    // be the last FOOTER_BYTES of the file. !success means the file is shorter than we
+    // expect. Note we can't detect if the file is larger than we expect without attempting
+    // to read past the end of the scan range, but in this case we'll fail below trying to
+    // parse the footer.
+    DCHECK_LE(scan_range_len, FOOTER_SIZE);
+    uint8_t* buffer;
+    bool success = stream_->ReadBytes(scan_range_len, &buffer, &parse_status_);
+    if (!success) {
+      DCHECK(!parse_status_.ok());
+      if (parse_status_.code() == TErrorCode::SCANNER_INCOMPLETE_READ) {
+        VLOG_QUERY << "Metadata for file '" << filename() << "' appears stale: "
+                   << "metadata states file size to be "
+                   << PrettyPrinter::Print(file_len, TUnit::BYTES)
+                   << ", but could only read "
+                   << PrettyPrinter::Print(stream_->total_bytes_returned(), TUnit::BYTES);
+        return Status(TErrorCode::STALE_METADATA_FILE_TOO_SHORT, filename(),
+            scan_node_->hdfs_table()->fully_qualified_name());
+      }
+      return parse_status_;
+    }
+    DCHECK(stream_->eosr());
+
+    // Number of bytes in buffer after the fixed size footer is accounted for.
+    int remaining_bytes_buffered = scan_range_len - sizeof(int32_t) -
+        sizeof(PARQUET_VERSION_NUMBER);
+
+    // Make sure footer has enough bytes to contain the required information.
+    if (remaining_bytes_buffered < 0) {
+      return Status(Substitute("File '$0' is invalid. Missing metadata.", filename()));
+    }
+
+    // Validate magic file bytes are correct.
+    uint8_t* magic_number_ptr = buffer + scan_range_len - sizeof(PARQUET_VERSION_NUMBER);
+    if (memcmp(magic_number_ptr, PARQUET_VERSION_NUMBER,
+            sizeof(PARQUET_VERSION_NUMBER)) != 0) {
+      return Status(TErrorCode::PARQUET_BAD_VERSION_NUMBER, filename(),
+          string(reinterpret_cast<char*>(magic_number_ptr), sizeof(PARQUET_VERSION_NUMBER)),
           scan_node_->hdfs_table()->fully_qualified_name());
     }
-    return parse_status_;
-  }
-  DCHECK(stream_->eosr());
 
-  // Number of bytes in buffer after the fixed size footer is accounted for.
-  int remaining_bytes_buffered = scan_range_len - sizeof(int32_t) -
-      sizeof(PARQUET_VERSION_NUMBER);
+    // The size of the metadata is encoded as a 4 byte little endian value before
+    // the magic number
+    uint8_t* metadata_size_ptr = magic_number_ptr - sizeof(int32_t);
+    uint32_t metadata_size = *reinterpret_cast<uint32_t*>(metadata_size_ptr);
+    uint8_t* metadata_ptr = metadata_size_ptr - metadata_size;
+    // The start of the metadata is:
+    // file_len - 4-byte footer length field - 4-byte version number field - metadata size
+    int64_t metadata_start = file_len - sizeof(int32_t) - sizeof(PARQUET_VERSION_NUMBER) -
+         metadata_size;
 
-  // Make sure footer has enough bytes to contain the required information.
-  if (remaining_bytes_buffered < 0) {
-    return Status(Substitute("File '$0' is invalid. Missing metadata.", filename()));
-  }
+    // If the metadata was too big, we need to read it into a contiguous buffer before
+    // deserializing it.
+    ScopedBuffer metadata_buffer(scan_node_->mem_tracker());
 
-  // Validate magic file bytes are correct.
-  uint8_t* magic_number_ptr = buffer + scan_range_len - sizeof(PARQUET_VERSION_NUMBER);
-  if (memcmp(magic_number_ptr, PARQUET_VERSION_NUMBER,
-             sizeof(PARQUET_VERSION_NUMBER)) != 0) {
-    return Status(TErrorCode::PARQUET_BAD_VERSION_NUMBER, filename(),
-        string(reinterpret_cast<char*>(magic_number_ptr), sizeof(PARQUET_VERSION_NUMBER)),
-        scan_node_->hdfs_table()->fully_qualified_name());
-  }
+    DCHECK(metadata_range_ != nullptr);
+    if (UNLIKELY(metadata_size > remaining_bytes_buffered)) {
+      // In this case, the metadata is bigger than our guess meaning there are
+      // not enough bytes in the footer range from IssueInitialRanges().
+      // We'll just issue more ranges to the IoMgr that is the actual footer.
+      int64_t partition_id = context_->partition_descriptor()->id();
+      const HdfsFileDesc* file_desc = scan_node_->GetFileDesc(partition_id, filename());
+      DCHECK_EQ(file_desc, stream_->file_desc());
+      if (metadata_start < 0) {
+        return Status(Substitute("File '$0' is invalid. Invalid metadata size in file "
+            "footer: $1 bytes. File size: $2 bytes.", filename(), metadata_size, file_len));
+      }
 
-  // The size of the metadata is encoded as a 4 byte little endian value before
-  // the magic number
-  uint8_t* metadata_size_ptr = magic_number_ptr - sizeof(int32_t);
-  uint32_t metadata_size = *reinterpret_cast<uint32_t*>(metadata_size_ptr);
-  uint8_t* metadata_ptr = metadata_size_ptr - metadata_size;
-  // The start of the metadata is:
-  // file_len - 4-byte footer length field - 4-byte version number field - metadata size
-  int64_t metadata_start = file_len - sizeof(int32_t) - sizeof(PARQUET_VERSION_NUMBER) -
-      metadata_size;
+      if (!metadata_buffer.TryAllocate(metadata_size)) {
+        string details = Substitute("Could not allocate buffer of $0 bytes for Parquet "
+            "metadata for file '$1'.", metadata_size, filename());
+        return scan_node_->mem_tracker()->MemLimitExceeded(state_, details, metadata_size);
+      }
+      metadata_ptr = metadata_buffer.buffer();
 
-  // If the metadata was too big, we need to read it into a contiguous buffer before
-  // deserializing it.
-  ScopedBuffer metadata_buffer(scan_node_->mem_tracker());
+      // Read the footer into the metadata buffer.
+      ScanRange* metadata_range = scan_node_->AllocateScanRange(
+          metadata_range_->fs(), filename(), metadata_size, metadata_start, partition_id,
+          metadata_range_->disk_id(), metadata_range_->expected_local(),
+          BufferOpts::ReadInto(metadata_buffer.buffer(), metadata_size));
 
-  DCHECK(metadata_range_ != nullptr);
-  if (UNLIKELY(metadata_size > remaining_bytes_buffered)) {
-    // In this case, the metadata is bigger than our guess meaning there are
-    // not enough bytes in the footer range from IssueInitialRanges().
-    // We'll just issue more ranges to the IoMgr that is the actual footer.
-    int64_t partition_id = context_->partition_descriptor()->id();
-    const HdfsFileDesc* file_desc = scan_node_->GetFileDesc(partition_id, filename());
-    DCHECK_EQ(file_desc, stream_->file_desc());
-    if (metadata_start < 0) {
-      return Status(Substitute("File '$0' is invalid. Invalid metadata size in file "
-          "footer: $1 bytes. File size: $2 bytes.", filename(), metadata_size, file_len));
+      unique_ptr<BufferDescriptor> io_buffer;
+      bool needs_buffers;
+      RETURN_IF_ERROR(
+          scan_node_->reader_context()->StartScanRange(metadata_range, &needs_buffers));
+      DCHECK(!needs_buffers) << "Already provided a buffer";
+      RETURN_IF_ERROR(metadata_range->GetNext(&io_buffer));
+      DCHECK_EQ(io_buffer->buffer(), metadata_buffer.buffer());
+      DCHECK_EQ(io_buffer->len(), metadata_size);
+      DCHECK(io_buffer->eosr());
+      metadata_range->ReturnBuffer(move(io_buffer));
     }
 
-    if (!metadata_buffer.TryAllocate(metadata_size)) {
-      string details = Substitute("Could not allocate buffer of $0 bytes for Parquet "
-          "metadata for file '$1'.", metadata_size, filename());
-      return scan_node_->mem_tracker()->MemLimitExceeded(state_, details, metadata_size);
+    // Deserialize file footer
+    // TODO: this takes ~7ms for a 1000-column table, figure out how to reduce this.
+    Status status =
+        DeserializeThriftMsg(metadata_ptr, &metadata_size, true, &file_metadata_);
+    if (!status.ok()) {
+      return Status(Substitute("File '$0' of length $1 bytes has invalid file metadata "
+          "at file offset $2, Error = $3.", filename(), file_len, metadata_start,
+          status.GetDetail()));
     }
-    metadata_ptr = metadata_buffer.buffer();
 
-    // Read the footer into the metadata buffer.
-    ScanRange* metadata_range = scan_node_->AllocateScanRange(
-        metadata_range_->fs(), filename(), metadata_size, metadata_start, partition_id,
-        metadata_range_->disk_id(), metadata_range_->expected_local(),
-        BufferOpts::ReadInto(metadata_buffer.buffer(), metadata_size));
-
-    unique_ptr<BufferDescriptor> io_buffer;
-    bool needs_buffers;
-    RETURN_IF_ERROR(
-        scan_node_->reader_context()->StartScanRange(metadata_range, &needs_buffers));
-    DCHECK(!needs_buffers) << "Already provided a buffer";
-    RETURN_IF_ERROR(metadata_range->GetNext(&io_buffer));
-    DCHECK_EQ(io_buffer->buffer(), metadata_buffer.buffer());
-    DCHECK_EQ(io_buffer->len(), metadata_size);
-    DCHECK(io_buffer->eosr());
-    metadata_range->ReturnBuffer(move(io_buffer));
-  }
-
-  // Deserialize file footer
-  // TODO: this takes ~7ms for a 1000-column table, figure out how to reduce this.
-  Status status =
-      DeserializeThriftMsg(metadata_ptr, &metadata_size, true, &file_metadata_);
-  if (!status.ok()) {
-    return Status(Substitute("File '$0' of length $1 bytes has invalid file metadata "
-        "at file offset $2, Error = $3.", filename(), file_len, metadata_start,
-        status.GetDetail()));
+    // XXX
+    footer_cache->Insert(scan_range->file(), file_metadata_);
   }
 
   RETURN_IF_ERROR(ParquetMetadataUtils::ValidateFileVersion(file_metadata_, filename()));
