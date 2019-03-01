@@ -797,9 +797,8 @@ class Impalad(object):
         port=self.web_ui_port,
         url=relative_url)
     try:
-      verify_ca = self.cluster.ca_cert if self.cluster.ca_cert is not None else False
-      resp = requests.get(url, params=params, timeout=timeout_secs,
-                          verify=verify_ca)
+      #verify_ca = self.cluster.ca_cert if self.cluster.ca_cert is not None else False
+      resp = requests.get(url, params=params, timeout=timeout_secs, verify=False)
     except requests.exceptions.Timeout as e:
       raise Timeout(underlying_exception=e)
     resp.raise_for_status()
