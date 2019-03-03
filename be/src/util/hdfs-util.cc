@@ -47,6 +47,19 @@ Status GetFileSize(const hdfsFS& connection, const char* filename, int64_t* file
   return Status::OK();
 }
 
+Status GetFileSizeMtime(const hdfsFS& connection, const char* filename,
+                        const time_t mtime, int64_t* filesize) {
+  hdfsFileInfo* info = hdfsGetPathInfo(connection, filename);
+  if (info == nullptr) return Status(GetHdfsErrorMsg("Failed to get file info ", filename));
+  if (UNLIKELY(info->mLastMod != mtime)) {
+    hdfsFreeFileInfo(info, 1);
+    return Status(Substitute("Modification time mismatch: $0", filename));
+  }
+  *filesize = info->mSize;
+  hdfsFreeFileInfo(info, 1);
+  return Status::OK();
+}
+
 Status GetLastModificationTime(const hdfsFS& connection, const char* filename,
                                time_t* last_mod_time) {
   hdfsFileInfo* info = hdfsGetPathInfo(connection, filename);

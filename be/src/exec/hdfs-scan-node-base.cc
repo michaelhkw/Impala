@@ -394,6 +394,17 @@ Status HdfsScanNodeBase::Open(RuntimeState* state) {
   cached_file_handles_miss_count_ = ADD_COUNTER(runtime_profile(),
       "CachedFileHandlesMissCount", TUnit::UNIT);
 
+  data_cache_hit_count_ = ADD_COUNTER(runtime_profile(),
+      "DataCacheHitCount", TUnit::UNIT);
+  data_cache_partial_hit_count_ = ADD_COUNTER(runtime_profile(),
+      "DataCachePartialHitCount", TUnit::UNIT);
+  data_cache_miss_count_ = ADD_COUNTER(runtime_profile(),
+      "DataCacheMissCount", TUnit::UNIT);
+  data_cache_hit_bytes_ = ADD_COUNTER(runtime_profile(),
+      "DataCacheHitBytes", TUnit::BYTES);
+  data_cache_miss_bytes_ = ADD_COUNTER(runtime_profile(),
+      "DataCacheMissBytes", TUnit::BYTES);
+
   max_compressed_text_file_length_ = runtime_profile()->AddHighWaterMarkCounter(
       "MaxCompressedTextFileLength", TUnit::BYTES);
 
@@ -933,6 +944,12 @@ void HdfsScanNodeBase::StopAndFinalizeCounters() {
     cached_file_handles_hit_count_->Set(reader_context_->cached_file_handles_hit_count());
     cached_file_handles_miss_count_->Set(
         reader_context_->cached_file_handles_miss_count());
+
+    data_cache_miss_bytes_->Set(reader_context_->data_cache_miss_bytes());
+    data_cache_hit_bytes_->Set(reader_context_->data_cache_hit_bytes());
+    data_cache_miss_count_->Set(reader_context_->data_cache_miss_count());
+    data_cache_hit_count_->Set(reader_context_->data_cache_hit_count());
+    data_cache_partial_hit_count_->Set(reader_context_->data_cache_partial_hit_count());
 
     if (unexpected_remote_bytes_->value() >= UNEXPECTED_REMOTE_BYTES_WARN_THRESHOLD) {
       runtime_state_->LogError(ErrorMsg(TErrorCode::GENERAL, Substitute(

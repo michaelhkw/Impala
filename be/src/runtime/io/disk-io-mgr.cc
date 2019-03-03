@@ -20,6 +20,7 @@
 #include "common/global-flags.h"
 #include "common/thread-debug-info.h"
 #include "runtime/exec-env.h"
+#include "runtime/io/data-cache.h"
 #include "runtime/io/disk-io-mgr-internal.h"
 #include "runtime/io/handle-cache.inline.h"
 #include "runtime/io/error-converter.h"
@@ -51,6 +52,9 @@ DEFINE_int32(num_disks, 0, "Number of disks on data node.");
 // Default IoMgr configs:
 // The maximum number of the threads per disk is also the max queue depth per disk.
 DEFINE_int32(num_threads_per_disk, 0, "Number of I/O threads per disk");
+
+// XXX
+DEFINE_string(data_cache_config, "", "XXX");
 
 // Rotational disks should have 1 thread per disk to minimize seeks.  Non-rotational
 // don't have this penalty and benefit from multiple concurrent IO requests.
@@ -228,6 +232,7 @@ DiskIoMgr::~DiskIoMgr() {
   disk_thread_group_.JoinAll();
   for (DiskQueue* disk_queue : disk_queues_) delete disk_queue;
   if (cached_read_options_ != nullptr) hadoopRzOptionsFree(cached_read_options_);
+  if (remote_data_cache_.get() != nullptr) remote_data_cache_->Close();
 }
 
 Status DiskIoMgr::Init() {
@@ -279,6 +284,14 @@ Status DiskIoMgr::Init() {
   ret = hadoopRzOptionsSetByteBufferPool(cached_read_options_, nullptr);
   DCHECK_EQ(ret, 0);
 
+  // XXX
+  if (!FLAGS_data_cache_config.empty()) {
+    remote_data_cache_.reset(new DataCache(FLAGS_data_cache_config));
+    if (!remote_data_cache_->Init().ok()) {
+      LOG(ERROR) << "Failed to initialize data cache.";
+      remote_data_cache_.reset();
+    }
+  }
   return Status::OK();
 }
 

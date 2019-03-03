@@ -696,7 +696,7 @@ Status Scheduler::ComputeScanRangeAssignment(const BackendConfig& executor_confi
     // Limit the number of remote executor candidates:
     // 1. When enabled by setting 'num_remote_executor_candidates' > 0
     // AND
-    // 2. This is an HDFS file split
+    // 2. This is an HDFS file split (S3/ADLS are treated as HDFS for this purpose, or seem to be) (TODO: verify)
     // AND
     // 3. The number of remote executor candidates is less than the number of backends.
     // Otherwise, fall back to the normal method of selecting executors for remote

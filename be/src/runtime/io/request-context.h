@@ -157,6 +157,12 @@ class RequestContext {
   int num_remote_ranges() const { return num_remote_ranges_.Load(); }
   int64_t unexpected_remote_bytes() const { return unexpected_remote_bytes_.Load(); }
 
+  int data_cache_hit_count() const { return data_cache_hit_count_.Load(); }
+  int data_cache_partial_hit_count() const { return data_cache_partial_hit_count_.Load(); }
+  int data_cache_miss_count() const { return data_cache_miss_count_.Load(); }
+  int64_t data_cache_hit_bytes() const { return data_cache_hit_bytes_.Load(); }
+  int64_t data_cache_miss_bytes() const { return data_cache_miss_bytes_.Load(); }
+
   int cached_file_handles_hit_count() const {
     return cached_file_handles_hit_count_.Load();
   }
@@ -350,6 +356,13 @@ class RequestContext {
 
   /// Total number of file handle opens where the file handle was not in the cache
   AtomicInt32 cached_file_handles_miss_count_{0};
+
+  /// Data cache counters.
+  AtomicInt32 data_cache_hit_count_{0};
+  AtomicInt32 data_cache_partial_hit_count_{0};
+  AtomicInt32 data_cache_miss_count_{0};
+  AtomicInt64 data_cache_hit_bytes_{0};
+  AtomicInt64 data_cache_miss_bytes_{0};
 
   /// END: private members that are accessed by other io:: classes
   /////////////////////////////////////////

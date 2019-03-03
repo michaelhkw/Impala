@@ -18,12 +18,17 @@
 #include <algorithm>
 
 #include "gutil/strings/substitute.h"
+#include "runtime/io/data-cache.h"
 #include "runtime/io/disk-io-mgr-internal.h"
 #include "runtime/io/hdfs-file-reader.h"
 #include "runtime/io/request-context.h"
 #include "runtime/io/request-ranges.h"
 #include "util/hdfs-util.h"
 #include "util/impalad-metrics.h"
+
+
+// XXX
+#include "util/hash-util.h"
 
 #include "common/names.h"
 
@@ -104,6 +109,27 @@ Status HdfsFileReader::ReadFromPos(int64_t file_offset, uint8_t* buffer,
   {
     ScopedTimer<MonotonicStopWatch> req_context_read_timer(
         scan_range_->reader_->read_timer_);
+
+    // If it's a remote scan range, try reading from the remote data cache.
+    DataCache* remote_data_cache = io_mgr->remote_data_cache();
+    //bool try_cache = !expected_local_ && remote_data_cache != nullptr;
+    bool try_cache = remote_data_cache != nullptr;
+    int64_t cached_read = 0;
+    if (try_cache) {
+      cached_read = remote_data_cache->Lookup(*scan_range_->file_string(),
+          scan_range_->mtime(), file_offset, bytes_to_read, buffer);
+      if (LIKELY(cached_read > 0)) {
+        *bytes_read = cached_read;
+        scan_range_->reader_->data_cache_hit_bytes_.Add(cached_read);
+        if (LIKELY(cached_read == bytes_to_read)) {
+          scan_range_->reader_->data_cache_hit_count_.Add(1);
+        } else {
+          scan_range_->reader_->data_cache_partial_hit_count_.Add(1);
+        }
+        ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_HIT_BYTES->Increment(cached_read);
+      }
+    }
+
     while (*bytes_read < bytes_to_read) {
       int chunk_size = min(bytes_to_read - *bytes_read, max_chunk_size);
       DCHECK_GT(chunk_size, 0);
@@ -131,6 +157,9 @@ Status HdfsFileReader::ReadFromPos(int64_t file_offset, uint8_t* buffer,
                 scan_range_->file_string(), scan_range_->mtime(),
                 request_context, &borrowed_hdfs_fh));
         hdfs_file = borrowed_hdfs_fh->file();
+        LOG(INFO) << "Reopening file " << scan_range_->file_string()
+                  << " with mtime " << scan_range_->mtime()
+                  << " offset " << file_offset;
         req_context_read_timer.Start();
         status = ReadFromPosInternal(hdfs_file, position_in_file,
             borrowed_hdfs_fh != nullptr, buffer + *bytes_read, chunk_size,
@@ -149,6 +178,21 @@ Status HdfsFileReader::ReadFromPos(int64_t file_offset, uint8_t* buffer,
 
       // Collect and accumulate statistics
       GetHdfsStatistics(hdfs_file);
+    }
+
+    if (try_cache && status.ok() && cached_read < *bytes_read) {
+      uint64_t hash = HashUtil::FastHash64(buffer, *bytes_read, 0xcafebeef);
+      VLOG(2) << Substitute("Caching file $0 mtime: $1 offset: $2 bytes_read $3 "
+           "checksum $4", *scan_range_->file_string(), scan_range_->mtime(),
+           file_offset, *bytes_read, hash);
+      DCHECK_GT(*bytes_read, 0);
+      DCHECK_LE(*bytes_read, bytes_to_read);
+      remote_data_cache->Store(*scan_range_->file_string(), scan_range_->mtime(), file_offset,
+          buffer, *bytes_read);
+      int64_t bytes_missed = *bytes_read - cached_read;
+      scan_range_->reader_->data_cache_miss_bytes_.Add(bytes_missed);
+      scan_range_->reader_->data_cache_miss_count_.Add(1);
+      ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_MISS_BYTES->Increment(bytes_missed);
     }
   }
 

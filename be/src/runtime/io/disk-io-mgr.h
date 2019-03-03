@@ -38,7 +38,9 @@ namespace impala {
 
 namespace io {
 
+class DataCache;
 class DiskQueue;
+
 /// Manager object that schedules IO for all queries on all disks and remote filesystems
 /// (such as S3). Each query maps to one or more RequestContext objects, each of which
 /// has its own queue of scan ranges and/or write ranges.
@@ -358,6 +360,9 @@ class DiskIoMgr : public CacheLineAligned {
   /// is something invalid about the scan range.
   Status ValidateScanRange(ScanRange* range) WARN_UNUSED_RESULT;
 
+  /// XXX
+  DataCache* remote_data_cache() { return remote_data_cache_.get(); }
+
  private:
   DISALLOW_COPY_AND_ASSIGN(DiskIoMgr);
   friend class DiskIoMgrTest_Buffers_Test;
@@ -428,6 +433,9 @@ class DiskIoMgr : public CacheLineAligned {
   /// Helper for AllocateBuffersForRange() to compute the buffer sizes for a scan range
   /// with length 'scan_range_len', given that 'max_bytes' of memory should be allocated.
   std::vector<int64_t> ChooseBufferSizes(int64_t scan_range_len, int64_t max_bytes);
+
+  /// XXX
+  std::unique_ptr<DataCache> remote_data_cache_;
 };
 }
 }
