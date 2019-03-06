@@ -124,6 +124,11 @@ under the License.
         <enabled>false</enabled>
       </snapshots>
     </repository>
+    <repository>
+      <id>local_repo</id>
+      <url>file://${env.IMPALA_HOME}/fe/local_repo/</url>
+      <name>Local Repository</name>
+    </repository>
   </repositories>
 
   <pluginRepositories>

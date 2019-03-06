@@ -309,7 +309,7 @@ public class FileSystemUtil {
     // Blacklist FileSystems that are known to not to include storage UUIDs.
     return !(fs instanceof S3AFileSystem || fs instanceof LocalFileSystem ||
         fs instanceof AzureBlobFileSystem || fs instanceof SecureAzureBlobFileSystem ||
-        fs instanceof AdlFileSystem);
+        fs instanceof AdlFileSystem || fs instanceof alluxio.hadoop.FileSystem);
   }
 
   /**

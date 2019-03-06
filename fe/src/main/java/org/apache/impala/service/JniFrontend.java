@@ -803,9 +803,10 @@ public class JniFrontend {
             fs instanceof S3AFileSystem ||
             fs instanceof AzureBlobFileSystem ||
             fs instanceof SecureAzureBlobFileSystem ||
-            fs instanceof AdlFileSystem)) {
+            fs instanceof AdlFileSystem ||
+            fs instanceof alluxio.hadoop.FileSystem)) {
         return "Currently configured default filesystem: " +
-            fs.getClass().getSimpleName() + ". " +
+            fs.getClass().getName() + ". " +
             CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY +
             " (" + CONF.get(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY) + ")" +
             " is not supported.";
