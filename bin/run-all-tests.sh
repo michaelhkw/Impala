@@ -189,11 +189,16 @@ do
   if [[ "$EE_TEST" == true ]]; then
     # Run end-to-end tests.
     # KERBEROS TODO - this will need to deal with ${KERB_ARGS}
-    if ! "${IMPALA_HOME}/tests/run-tests.py" ${COMMON_PYTEST_ARGS} \
-        ${RUN_TESTS_ARGS} ${EE_TEST_FILES}; then
-      #${KERB_ARGS};
-      TEST_RET_CODE=1
-    fi
+    c=1
+    while [ $c -le 100 ]
+    do
+        if ! "${IMPALA_HOME}/tests/run-tests.py" ${COMMON_PYTEST_ARGS} \
+            ${RUN_TESTS_ARGS} ${EE_TEST_FILES}; then
+	  TEST_RET_CODE=1;
+          break;
+	fi
+        (( c++ ))
+    done
   fi
 
   if [[ "$JDBC_TEST" == true ]]; then
