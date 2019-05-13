@@ -59,6 +59,11 @@ fi
 : ${RUN_TESTS_ARGS:=}
 # Extra args to pass to run-custom-cluster-tests.sh
 : ${RUN_CUSTOM_CLUSTER_TESTS_ARGS:=}
+# Default data cache location. Effective for S3 builds only.
+# Set this to empty to disable data cache for S3 builds.
+: ${DATA_CACHE_DIR:=/tmp}
+# Default data cache size. Effective for S3 builds only.
+: ${DATA_CACHE_SIZE:=500MB}
 if [[ "${TARGET_FILESYSTEM}" == "local" ]]; then
   # TODO: Remove abort_on_config_error flag from here and create-load-data.sh once
   # checkConfiguration() accepts the local filesystem (see IMPALA-1850).
@@ -67,6 +72,12 @@ if [[ "${TARGET_FILESYSTEM}" == "local" ]]; then
   FE_TEST=false
 else
   TEST_START_CLUSTER_ARGS="${TEST_START_CLUSTER_ARGS} --cluster_size=3"
+fi
+
+# Enable data cache by default for s3 builds.
+if [[ "${TARGET_FILESYSTEM}" == "s3" && -n "${DATA_CACHE_DIR}" ]]; then
+   TEST_START_CLUSTER_ARGS="${TEST_START_CLUSTER_ARGS} "`
+       `"--data_cache_dir=${DATA_CACHE_DIR} --data_cache_size=${DATA_CACHE_SIZE}"
 fi
 
 if [[ "${ERASURE_CODING}" = true ]]; then
