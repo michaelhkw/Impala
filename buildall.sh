@@ -532,6 +532,8 @@ run_all_tests() {
   if [[ $CODE_COVERAGE -eq 1 ]]; then
     RUN_ALL_TESTS_ARGS+=" -c"
   fi
+  export DATA_CACHE_DIR=/tmp
+  export DATA_CACHE_SIZE=500MB
   "${IMPALA_HOME}/bin/run-all-tests.sh" -e $EXPLORATION_STRATEGY $RUN_ALL_TESTS_ARGS
 }
 
