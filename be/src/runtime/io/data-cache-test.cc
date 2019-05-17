@@ -262,6 +262,18 @@ TEST_F(DataCacheTest, TestBasics) {
 
   // Check that an insertion larger than the cache size will fail.
   ASSERT_FALSE(cache.Store(FNAME, MTIME, 0, test_buffer(), cache_size * 2));
+
+  // Test with bad 'mtime' to make sure the entry is not stored.
+  ASSERT_FALSE(cache.Store(FNAME, -1, 0, test_buffer(), TEMP_BUFFER_SIZE));
+  ASSERT_EQ(0, cache.Lookup(FNAME, -1, 0, TEMP_BUFFER_SIZE, buffer));
+
+  // Test with bad 'offset' to make sure the entry is not stored.
+  ASSERT_FALSE(cache.Store(FNAME, MTIME, -1, test_buffer(), TEMP_BUFFER_SIZE));
+  ASSERT_EQ(0, cache.Lookup(FNAME, MTIME, -1, TEMP_BUFFER_SIZE, buffer));
+
+  // Test with bad 'buffer_len' to make sure the entry is not stored.
+  ASSERT_FALSE(cache.Store(FNAME, MTIME, 0, test_buffer(), -1));
+  ASSERT_EQ(0, cache.Lookup(FNAME, MTIME, 0, -1, buffer));
 }
 
 // Tests backing file rotation by setting FLAGS_data_cache_file_max_size_bytes to be 1/4
