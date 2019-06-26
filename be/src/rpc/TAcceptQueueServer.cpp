@@ -19,16 +19,20 @@
 // This file was copied from apache::thrift::server::TThreadedServer.cpp v0.9.0, with the
 // significant changes noted inline below.
 
-#include <algorithm>
 #include "rpc/TAcceptQueueServer.h"
 
+#include <gutil/walltime.h>
 #include <thrift/concurrency/PlatformThreadFactory.h>
 #include <thrift/transport/TSocket.h>
 
+#include "util/histogram-metric.h"
 #include "util/metrics.h"
+#include "util/stopwatch.h"
 #include "rpc/thrift-util.h"
 #include "rpc/thrift-server.h"
 #include "util/thread-pool.h"
+
+#include "common/names.h"
 
 DEFINE_int32(accepted_cnxn_queue_depth, 10000,
     "(Advanced) The size of the post-accept, pre-setup connection queue in each thrift "
@@ -191,10 +195,6 @@ TAcceptQueueServer::TAcceptQueueServer(const boost::shared_ptr<TProcessor>& proc
 }
 
 void TAcceptQueueServer::init() {
-  stop_ = false;
-  metrics_enabled_ = false;
-  queue_size_metric_ = nullptr;
-
   if (!threadFactory_) {
     threadFactory_.reset(new PlatformThreadFactory);
   }
@@ -221,16 +221,26 @@ void TAcceptQueueServer::SetupConnection(shared_ptr<TAcceptQueueEntry> entry) {
   shared_ptr<TTransport> inputTransport;
   shared_ptr<TTransport> outputTransport;
   shared_ptr<TTransport> client = entry->client_;
+  const string& socket_info = reinterpret_cast<TSocket*>(client.get())->getSocketInfo();
+  VLOG(1) << Substitute("TAcceptQueueServer: $0 started connection setup for client $1",
+      name_,  socket_info);
   try {
+    MonotonicStopWatch timer;
+    timer.Start();
     inputTransport = inputTransportFactory_->getTransport(client);
     outputTransport = outputTransportFactory_->getTransport(client);
     shared_ptr<TProtocol> inputProtocol =
         inputProtocolFactory_->getProtocol(inputTransport);
     shared_ptr<TProtocol> outputProtocol =
         outputProtocolFactory_->getProtocol(outputTransport);
-
     shared_ptr<TProcessor> processor =
         getProcessor(inputProtocol, outputProtocol, client);
+
+    if (metrics_enabled_) {
+      cnxns_setup_time_metric_->Update(timer.ElapsedTime() / NANOS_PER_MICRO);
+    }
+    VLOG(1) << Substitute("TAcceptQueueServer: $0 finished connection setup for "
+        "client $1", name_,  socket_info);
 
     TAcceptQueueServer::Task* task = new TAcceptQueueServer::Task(
         *this, processor, inputProtocol, outputProtocol, client);
@@ -242,6 +252,7 @@ void TAcceptQueueServer::SetupConnection(shared_ptr<TAcceptQueueEntry> entry) {
     shared_ptr<Thread> thread = shared_ptr<Thread>(threadFactory_->newThread(runnable));
 
     // Insert thread into the set of threads
+    timer.Reset();
     {
       Synchronized s(tasksMonitor_);
       int64_t wait_time_ms = 0;
@@ -257,7 +268,10 @@ void TAcceptQueueServer::SetupConnection(shared_ptr<TAcceptQueueEntry> entry) {
                   << "Waiting for " << wait_time_ms << " milliseconds.";
         int wait_result = tasksMonitor_.waitForTimeRelative(wait_time_ms);
         if (wait_result == THRIFT_ETIMEDOUT) {
-          if (metrics_enabled_) timedout_cnxns_metric_->Increment(1);
+          if (metrics_enabled_) {
+            thread_wait_time_metric_->Update(timer.ElapsedTime() / NANOS_PER_MICRO);
+            timedout_cnxns_metric_->Increment(1);
+          }
           LOG(INFO) << name_ << ": Server busy. Timing out connection request.";
           string errStr = "TAcceptQueueServer: " + name_ + " server busy";
           CleanupAndClose(errStr, inputTransport, outputTransport, client);
@@ -266,14 +280,19 @@ void TAcceptQueueServer::SetupConnection(shared_ptr<TAcceptQueueEntry> entry) {
       }
       tasks_.insert(task);
     }
+    if (metrics_enabled_) {
+      thread_wait_time_metric_->Update(timer.ElapsedTime() / NANOS_PER_MICRO);
+    }
 
     // Start the thread!
     thread->start();
-  } catch (TException& tx) {
-    string errStr = string("TAcceptQueueServer: Caught TException: ") + tx.what();
+  } catch (const TException& tx) {
+    string errStr = Substitute("TAcceptQueueServer: $0 connection setup failed for "
+        "client $1. Caught TException: $2", name_, socket_info, string(tx.what()));
     CleanupAndClose(errStr, inputTransport, outputTransport, client);
   } catch (string s) {
-    string errStr = "TAcceptQueueServer: Unknown exception: " + s;
+    string errStr = Substitute("TAcceptQueueServer: $0 connection setup failed for "
+        "client $1. Unknown exception: $2", name_, socket_info, s);
     CleanupAndClose(errStr, inputTransport, outputTransport, client);
   }
 }
@@ -313,6 +332,10 @@ void TAcceptQueueServer::serve() {
       // Fetch client from server
       shared_ptr<TTransport> client = serverTransport_->accept();
 
+      TSocket* socket = reinterpret_cast<TSocket*>(client.get());
+      VLOG(1) << Substitute("New connection to server $0 from client $1",
+          name_, socket->getSocketInfo());
+
       shared_ptr<TAcceptQueueEntry> entry{new TAcceptQueueEntry};
       entry->client_ = client;
       if (queue_timeout_ms_ > 0) {
@@ -328,14 +351,14 @@ void TAcceptQueueServer::serve() {
         break;
       }
       if (metrics_enabled_) queue_size_metric_->Increment(1);
-    } catch (TTransportException& ttx) {
+    } catch (const TTransportException& ttx) {
       if (!stop_ || ttx.getType() != TTransportException::INTERRUPTED) {
         string errStr =
             string("TAcceptQueueServer: TServerTransport died on accept: ") + ttx.what();
         GlobalOutput(errStr.c_str());
       }
       continue;
-    } catch (TException& tx) {
+    } catch (const TException& tx) {
       string errStr = string("TAcceptQueueServer: Caught TException: ") + tx.what();
       GlobalOutput(errStr.c_str());
       continue;
@@ -377,6 +400,14 @@ void TAcceptQueueServer::InitMetrics(MetricGroup* metrics, const string& key_pre
   stringstream timedout_cnxns_ss;
   timedout_cnxns_ss << key_prefix << ".timedout-cnxn-requests";
   timedout_cnxns_metric_ = metrics->AddGauge(timedout_cnxns_ss.str(), 0);
+  stringstream cnxns_setup_time_ss;
+  cnxns_setup_time_ss << key_prefix << ".connection-setup-time";
+  cnxns_setup_time_metric_ = metrics->RegisterMetric(new HistogramMetric(
+      MetricDefs::Get(cnxns_setup_time_ss.str()), 5 * 60 * MICROS_PER_SEC, 1));
+  stringstream thread_wait_time_ss;
+  thread_wait_time_ss << key_prefix << ".svc-thread-wait-time";
+  thread_wait_time_metric_ = metrics->RegisterMetric(new HistogramMetric(
+      MetricDefs::Get(thread_wait_time_ss.str()), 5 * 60 * MICROS_PER_SEC, 1));
   metrics_enabled_ = true;
 }
 
