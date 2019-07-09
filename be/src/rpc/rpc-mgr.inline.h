@@ -28,6 +28,7 @@
 #include "kudu/rpc/service_pool.h"
 #include "kudu/rpc/user_credentials.h"
 #include "runtime/exec-env.h"
+#include "util/debug-util.h"
 #include "util/network-util.h"
 
 DECLARE_bool(rpc_use_loopback);
@@ -40,6 +41,8 @@ Status RpcMgr::GetProxy(const TNetworkAddress& address, const std::string& hostn
   DCHECK(proxy != nullptr);
   DCHECK(is_inited()) << "Must call Init() before GetProxy()";
   DCHECK(IsResolvedAddress(address));
+  DCHECK(!IsResolvedAddress(MakeNetworkAddress(hostname))) << hostname << "\n"
+                                                           << GetStackTrace();
   TNetworkAddress address_to_use = address;
   // Talk to self via loopback.
   if (FLAGS_rpc_use_loopback &&
