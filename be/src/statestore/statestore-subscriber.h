@@ -32,6 +32,7 @@
 #include "rpc/thrift-util.h"
 #include "statestore/statestore.h"
 #include "statestore/statestore-service-client-wrapper.h"
+#include "util/promise.h"
 #include "util/stopwatch.h"
 #include "gen-cpp/StatestoreService.h"
 #include "gen-cpp/StatestoreSubscriber.h"
@@ -117,10 +118,11 @@ class StatestoreSubscriber {
       const UpdateCallback& callback);
 
   /// Registers this subscriber with the statestore, and starts the
-  /// heartbeat service, as well as a thread to check for failure and
-  /// initiate recovery mode.
-  //
-  /// Returns OK unless some error occurred, like a failure to connect.
+  /// heartbeat service, as well as the registration thread. See comments
+  /// below about the role of the registration thread. This function will
+  /// block until the initial registration is done by the registration thread.
+  ///
+  /// Returns OK unless some error occurred such as invalid subscriber ID.
   Status Start();
 
   /// Return the port that the subscriber is listening on.
@@ -149,8 +151,8 @@ class StatestoreSubscriber {
   /// Failure detector that tracks heartbeat messages from the statestore.
   boost::scoped_ptr<impala::TimeoutFailureDetector> failure_detector_;
 
-  /// Thread in which RecoveryModeChecker runs.
-  std::unique_ptr<Thread> recovery_mode_thread_;
+  /// Thread in which registration runs.
+  std::unique_ptr<Thread> registration_thread_;
 
   /// statestore client cache - only one client is ever used. Initialized in constructor.
   boost::scoped_ptr<StatestoreClientCache> client_cache_;
@@ -164,11 +166,11 @@ class StatestoreSubscriber {
   /// Metric to count the total number of connection failures to the statestore
   IntCounter* connection_failure_metric_;
 
-  /// Amount of time last spent in recovery mode
-  DoubleGauge* last_recovery_duration_metric_;
+  /// Amount of time last spent in registration.
+  DoubleGauge* last_registration_duration_metric_;
 
-  /// When the last recovery happened.
-  StringProperty* last_recovery_time_metric_;
+  /// When the last registration happened.
+  StringProperty* last_registration_time_metric_;
 
   /// Accumulated statistics on the frequency of topic-update messages, including samples
   /// from all topics.
@@ -200,9 +202,10 @@ class StatestoreSubscriber {
   /// updated in Start() with the actual port if the wildcard port 0 was specified.
   TNetworkAddress heartbeat_address_;
 
-  /// Set to true after Register(...) is successful, after which no
-  /// more topics may be subscribed to.
-  bool is_registered_;
+  /// Status for the initial registration. Set only after the initial registration with
+  /// Statestore is done. Used for synchronization between the main thread and the
+  /// registration thread.
+  Promise<Status> registration_status_;
 
   /// Protects registration_id_. Must be taken after lock_ if both are to be taken
   /// together.
@@ -297,7 +300,7 @@ class StatestoreSubscriber {
   /// During recovery mode, any public methods that are started will block on lock_, which
   /// is only released when recovery finishes. In practice, all registrations are made
   /// early in the life of an impalad before the statestore could be detected as failed.
-  [[noreturn]] void RecoveryModeChecker();
+  [[noreturn]] void RegistrationLoop();
 
   /// Creates a client of the remote statestore and sends a list of
   /// topics to register for. Returns OK unless there is some problem
@@ -308,6 +311,17 @@ class StatestoreSubscriber {
   /// set, an error otherwise. Used to confirm that RPCs from the statestore are intended
   /// for the current registration epoch.
   Status CheckRegistrationId(const RegistrationId& registration_id);
+
+  /// Returns true if the initial registration with Statestore is done.
+  bool IsRegistered() {
+    return registration_status_.IsSet();
+  }
+
+  /// Returns true iff the error status is considered "transient". Currently, we only
+  /// consider failure to resolve the subscriber's hostname by statestore as a transient
+  /// error, which can happen in certain deployment scenarios (e.g. the Kubernetes pod in
+  /// which the subscriber resides is "not ready").
+  bool IsTransientError(const Status& status) const;
 
   int64_t MilliSecondsSinceLastRegistration() const {
     return MonotonicMillis() - last_registration_ms_.Load();

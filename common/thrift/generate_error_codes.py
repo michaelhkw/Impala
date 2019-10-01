@@ -438,6 +438,9 @@ error_codes = (
 
   ("AVRO_INVALID_DATE", 144, "Avro file '$0' is corrupt: out of range date value $1 "
    "at offset $2. The valid date range is -719528..2932896 (0000-01-01..9999-12-31)."),
+
+  ("STATESTORE_UNRESOLVED_ADDR", 145, "Failed to register subscriber $0 "
+   "at $1 as its address cannot be resolved."),
 )
 
 import sys

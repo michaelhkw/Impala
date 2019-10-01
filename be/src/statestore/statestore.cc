@@ -36,6 +36,7 @@
 #include "util/collection-metrics.h"
 #include "util/container-util.h"
 #include "util/debug-util.h"
+#include "util/error-util.h"
 #include "util/logging-support.h"
 #include "util/metrics.h"
 #include "util/openssl-util.h"
@@ -593,7 +594,16 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
     const TNetworkAddress& location,
     const vector<TTopicRegistration>& topic_registrations,
     RegistrationId* registration_id) {
-  if (subscriber_id.empty()) return Status("Subscriber ID cannot be empty string");
+  if (subscriber_id.empty()) return Status("Statestore subscriber ID cannot be empty");
+
+  if (!IsResolvedAddress(location)) {
+    IpAddr ip_address;
+    Status status = HostnameToIpAddr(location.hostname, &ip_address);
+    if (!status.ok()) {
+      return Status::Expected(TErrorCode::STATESTORE_UNRESOLVED_ADDR,
+          subscriber_id, location.hostname);
+    }
+  }
 
   // Create any new topics first, so that when the subscriber is first sent a topic update
   // by the worker threads its topics are guaranteed to exist.

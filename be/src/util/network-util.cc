@@ -76,7 +76,7 @@ Status HostnameToIpAddr(const Hostname& hostname, IpAddr* ip){
   if (getaddrinfo(hostname.c_str(), NULL, &hints, &addr_info) != 0) {
     stringstream ss;
     ss << "Could not find IPv4 address for: " << hostname;
-    return Status(ss.str());
+    return Status::Expected(ss.str());
   }
 
   addrinfo* it = addr_info;
@@ -88,7 +88,7 @@ Status HostnameToIpAddr(const Hostname& hostname, IpAddr* ip){
       stringstream ss;
       ss << "Could not convert IPv4 address for: " << hostname;
       freeaddrinfo(addr_info);
-      return Status(ss.str());
+      return Status::Expected(ss.str());
     }
     addresses.push_back(string(addr_buf));
     it = it->ai_next;
@@ -99,7 +99,7 @@ Status HostnameToIpAddr(const Hostname& hostname, IpAddr* ip){
   if (addresses.empty()) {
     stringstream ss;
     ss << "Could not convert IPv4 address for: " << hostname;
-    return Status(ss.str());
+    return Status::Expected(ss.str());
   }
 
   // RFC 3484 only specifies a partial order for the result of getaddrinfo() so we need to
