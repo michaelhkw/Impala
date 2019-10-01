@@ -56,7 +56,8 @@ using namespace strings;
 DEFINE_int32(statestore_subscriber_timeout_seconds, 30, "The amount of time (in seconds)"
      " that may elapse before the connection with the statestore is considered lost.");
 DEFINE_int32(statestore_subscriber_cnxn_attempts, 10, "The number of times to retry an "
-    "RPC connection to the statestore. A setting of 0 means retry indefinitely");
+    "RPC connection to the statestore during initial registration. "
+    "A setting of 0 means retry indefinitely");
 DEFINE_int32(statestore_subscriber_cnxn_retry_interval_ms, 3000, "The interval, in ms, "
     "to wait between attempts to make an RPC connection to the statestore.");
 DEFINE_bool(statestore_subscriber_use_resolved_address, false, "If set to true, the "
@@ -131,15 +132,14 @@ StatestoreSubscriber::StatestoreSubscriber(const string& subscriber_id,
       client_cache_(new StatestoreClientCache(1, 0, 0, 0, "",
                 !FLAGS_ssl_client_ca_certificate.empty())),
       metrics_(metrics->GetOrCreateChildGroup("statestore-subscriber")),
-      heartbeat_address_(heartbeat_address),
-      is_registered_(false) {
+      heartbeat_address_(heartbeat_address) {
   connected_to_statestore_metric_ =
       metrics_->AddProperty("statestore-subscriber.connected", false);
   connection_failure_metric_ =
     metrics_->AddCounter("statestore-subscriber.num-connection-failures", 0);
-  last_recovery_duration_metric_ = metrics_->AddDoubleGauge(
+  last_registration_duration_metric_ = metrics_->AddDoubleGauge(
       "statestore-subscriber.last-recovery-duration", 0.0);
-  last_recovery_time_metric_ = metrics_->AddProperty<string>(
+  last_registration_time_metric_ = metrics_->AddProperty<string>(
       "statestore-subscriber.last-recovery-time", "N/A");
   topic_update_interval_metric_ = StatsMetric<double>::CreateAndRegister(metrics_,
       "statestore-subscriber.topic-update-interval-time");
@@ -156,7 +156,7 @@ Status StatestoreSubscriber::AddTopic(const Statestore::TopicId& topic_id,
     bool is_transient, bool populate_min_subscriber_topic_version,
     string filter_prefix, const UpdateCallback& callback) {
   lock_guard<shared_mutex> exclusive_lock(lock_);
-  if (is_registered_) return Status("Subscriber already started, can't add new topic");
+  if (IsRegistered()) return Status("Subscriber already started, can't add new topic");
   TopicRegistration& registration = topic_registrations_[topic_id];
   registration.callbacks.push_back(callback);
   if (registration.processing_time_metric == nullptr) {
@@ -174,7 +174,14 @@ Status StatestoreSubscriber::AddTopic(const Statestore::TopicId& topic_id,
 }
 
 Status StatestoreSubscriber::Register() {
+  static int32_t attempt = 0; // used for debug actions only
+  if (UNLIKELY(attempt++ == 0)) {
+    RETURN_IF_ERROR(DebugAction(FLAGS_debug_actions, "REGISTER_SUBSCRIBER_FIRST_ATTEMPT"));
+  }
   Status client_status;
+  StatestoreServiceConn client(client_cache_.get(), statestore_address_, &client_status);
+  RETURN_IF_ERROR(client_status);
+
   TRegisterSubscriberRequest request;
   for (const auto& registration : topic_registrations_) {
     TTopicRegistration thrift_topic;
@@ -189,19 +196,9 @@ Status StatestoreSubscriber::Register() {
   request.subscriber_location = heartbeat_address_;
   request.subscriber_id = subscriber_id_;
   TRegisterSubscriberResponse response;
-  int attempt = 0; // Used for debug action only.
-  StatestoreServiceConn::RpcStatus rpc_status =
-      StatestoreServiceConn::DoRpcWithRetry(client_cache_.get(), statestore_address_,
-          &StatestoreServiceClientWrapper::RegisterSubscriber, request,
-          FLAGS_statestore_subscriber_cnxn_attempts,
-          FLAGS_statestore_subscriber_cnxn_retry_interval_ms,
-          [&attempt]() {
-            return attempt++ == 0 ?
-                DebugAction(FLAGS_debug_actions, "REGISTER_SUBSCRIBER_FIRST_ATTEMPT") :
-                Status::OK();
-          },
-          &response);
-  RETURN_IF_ERROR(rpc_status.status);
+  RETURN_IF_ERROR(client.DoRpc(&StatestoreServiceClientWrapper::RegisterSubscriber,
+      request, &response));
+
   Status status = Status(response.status);
   if (status.ok()) {
     connected_to_statestore_metric_->SetValue(true);
@@ -221,13 +218,12 @@ Status StatestoreSubscriber::Register() {
 }
 
 Status StatestoreSubscriber::Start() {
-  Status status;
   {
     // Take the lock to ensure that, if a topic-update is received during registration
     // (perhaps because Register() has succeeded, but we haven't finished setting up state
     // on the client side), UpdateState() will reject the message.
     lock_guard<shared_mutex> exclusive_lock(lock_);
-    LOG(INFO) << "Starting statestore subscriber";
+    LOG(INFO) << "Starting statestore subscriber " << subscriber_id_;
 
     // Backend must be started before registration
     boost::shared_ptr<TProcessor> processor(
@@ -264,73 +260,91 @@ Status StatestoreSubscriber::Start() {
           ip_address);
     }
     heartbeat_address_.port = heartbeat_server_->port();
-
-    LOG(INFO) << "Registering with statestore";
-    status = Register();
-    if (status.ok()) {
-      is_registered_ = true;
-      LOG(INFO) << "statestore registration successful";
-    } else {
-      LOG(INFO) << "statestore registration unsuccessful: " << status.GetDetail();
-    }
   }
 
-  // Registration is finished at this point, so it's fine to release the lock.
-  RETURN_IF_ERROR(Thread::Create("statestore-subscriber", "recovery-mode-thread",
-      &StatestoreSubscriber::RecoveryModeChecker, this, &recovery_mode_thread_));
+  // Kick off the thread which will do the initial registration.
+  RETURN_IF_ERROR(Thread::Create("statestore-subscriber", "registration-thread",
+      &StatestoreSubscriber::RegistrationLoop, this, &registration_thread_));
 
+  // Wait till initial registration is done.
+  Status status = registration_status_.Get();
+  if (status.ok()) {
+    LOG(INFO) << Substitute("Statestore subscriber $0 initial registration succeeded",
+        subscriber_id_);
+  } else{
+    LOG(INFO) << Substitute("Statestore subscriber $0 initial registration failed: $1",
+        subscriber_id_, status.GetDetail());
+  }
   return status;
 }
 
-void StatestoreSubscriber::RecoveryModeChecker() {
+void StatestoreSubscriber::RegistrationLoop() {
   failure_detector_->UpdateHeartbeat(STATESTORE_ID, true);
 
-  // Every few seconds, wake up and check if the failure detector has determined
-  // that the statestore has failed from our perspective. If so, enter recovery
-  // mode and try to reconnect, followed by reregistering all subscriptions.
+  // The following loop is the workhorse for making all registration calls to statestore.
+  // Registration with statestore needs to happen in two scenarios:
+  //
+  // - initial startup of a statestore subscriber
+  // - statestore has failed from the subscriber's persepective after initial registration
+  //   (due to too many missing heartbeats)
+  //
+  // Every few seconds, the registration thread wakes up and checks if any of the above
+  // scenerios is true and if so, try to connect and register with statestore.
   while (true) {
-    if (failure_detector_->GetPeerState(STATESTORE_ID) == FailureDetector::FAILED) {
-      // When entering recovery mode, the class-wide lock_ is taken to
-      // ensure mutual exclusion with any operations in flight.
+    const bool is_registered = IsRegistered();
+    if (!is_registered ||
+        failure_detector_->GetPeerState(STATESTORE_ID) == FailureDetector::FAILED) {
+      // Take the class-wide lock_ to ensure mutual exclusion with any operations in flight.
       lock_guard<shared_mutex> exclusive_lock(lock_);
-      MonotonicStopWatch recovery_timer;
-      recovery_timer.Start();
+      MonotonicStopWatch registration_timer;
+      registration_timer.Start();
       connected_to_statestore_metric_->SetValue(false);
-      connection_failure_metric_->Increment(1);
-      LOG(INFO) << subscriber_id_
-                << ": Connection with statestore lost, entering recovery mode";
+      if (is_registered) {
+        connection_failure_metric_->Increment(1);
+        LOG(INFO) << Substitute("$0: connection with statestore lost, entering "
+            "recovery mode", subscriber_id_);
+      }
       uint32_t attempt_count = 1;
-      while (true) {
-        LOG(INFO) << "Trying to re-register with statestore, attempt: "
-                  << attempt_count++;
+      bool connected = false;
+      while (!connected) {
+        LOG(INFO) << Substitute("Subscriber $0 trying to $1 with statestore, attempt: $2",
+            subscriber_id_, is_registered ? "re-register" : "register", attempt_count++);
+
         Status status = Register();
-        if (status.ok()) {
+        connected = status.ok();
+        if (connected) {
           // Make sure to update failure detector so that we don't immediately fail on the
           // next loop while we're waiting for heartbeat messages to resume.
           failure_detector_->UpdateHeartbeat(STATESTORE_ID, true);
-          LOG(INFO) << "Reconnected to statestore. Exiting recovery mode";
-
-          // Break out of enclosing while (true) to top of outer-scope loop.
-          break;
+          if (!is_registered) {
+            registration_status_.Set(status);
+          } else {
+            LOG(INFO) << "Reconnected to statestore. Exiting recovery mode";
+          }
         } else {
-          // Don't exit recovery mode, continue
-          LOG(WARNING) << "Failed to re-register with statestore: "
-                       << status.GetDetail();
-          SleepForMs(SLEEP_INTERVAL_MS);
+          // Failed to register with statestore. Retry after sleeping for some time.
+          LOG(INFO) << Substitute("Failed to $0 with statestore: $1",
+              is_registered ? "re-register" : "register", status.GetDetail());
+          // If it's initial registration, give up after a certain number of retries.
+          if (!is_registered && FLAGS_statestore_subscriber_cnxn_attempts > 0 &&
+              attempt_count >= FLAGS_statestore_subscriber_cnxn_attempts) {
+            // Initial registration failed. Break out of the loop.
+            registration_status_.Set(status);
+            break;
+          }
+          SleepForMs(FLAGS_statestore_subscriber_cnxn_retry_interval_ms);
         }
-        last_recovery_duration_metric_->SetValue(
-            recovery_timer.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
+        last_registration_duration_metric_->SetValue(
+            registration_timer.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
       }
       // When we're successful in re-registering, we don't do anything
       // to re-send our updates to the statestore. It is the
       // responsibility of individual clients to post missing updates
       // back to the statestore. This saves a lot of complexity where
       // we would otherwise have to cache updates here.
-      last_recovery_duration_metric_->SetValue(
-          recovery_timer.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
-      last_recovery_time_metric_->SetValue(CurrentTimeString());
+      last_registration_time_metric_->SetValue(CurrentTimeString());
     }
-
+    // No work needs to be done. Sleep for a bit and check again later.
     SleepForMs(SLEEP_INTERVAL_MS);
   }
 }

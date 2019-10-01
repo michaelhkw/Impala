@@ -36,8 +36,7 @@ class TestStatestoreRpcErrors(CustomClusterTestSuite):
   @CustomClusterTestSuite.with_args(
       " --debug_actions=REGISTER_SUBSCRIBER_FIRST_ATTEMPT:FAIL@1.0")
   def test_register_subscriber_rpc_error(self, vector):
-    self.assert_impalad_log_contains("INFO",
-        "Injected RPC error.*Debug Action: REGISTER_SUBSCRIBER_FIRST_ATTEMPT")
+    self.assert_impalad_log_contains("INFO", "Failed to register with statestore")
 
     # Ensure cluster has started up by running a query.
     result = self.execute_query("select count(*) from functional_parquet.alltypes")

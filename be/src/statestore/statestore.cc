@@ -593,7 +593,7 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
     const TNetworkAddress& location,
     const vector<TTopicRegistration>& topic_registrations,
     RegistrationId* registration_id) {
-  if (subscriber_id.empty()) return Status("Subscriber ID cannot be empty string");
+  if (subscriber_id.empty()) return Status("Subscriber ID cannot be empty");
 
   // Create any new topics first, so that when the subscriber is first sent a topic update
   // by the worker threads its topics are guaranteed to exist.
